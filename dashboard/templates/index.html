@@ -50,7 +50,7 @@
       <section class="panel scenes-panel">
         <div class="panel-head">
           <h2>Scenes Grid (Editable)</h2>
-          <p>Edit prompts inline, then trigger images/videos per scene.</p>
+          <p>Edit prompts inline, then trigger images/videos per scene. Double-click any prompt box to open a larger editor.</p>
         </div>
         <div class="table-wrap">
           <table id="scenesTable">
@@ -216,6 +216,22 @@
         <div class="media-modal-body">
           <img id="mediaModalImage" class="media-modal-image" alt="Preview image" />
           <video id="mediaModalVideo" class="media-modal-video" controls preload="metadata"></video>
+        </div>
+      </div>
+    </div>
+
+    <div id="textModal" class="text-modal" aria-hidden="true">
+      <div class="text-modal-backdrop" data-text-close="true"></div>
+      <div class="text-modal-dialog" role="dialog" aria-modal="true" aria-label="Expanded Text Editor">
+        <div class="text-modal-head">
+          <div id="textModalTitle" class="text-modal-title">Expanded Editor</div>
+          <button id="textModalClose" class="btn btn-glass btn-sm" type="button">Close</button>
+        </div>
+        <div class="text-modal-body">
+          <textarea id="textModalInput" class="text-modal-input"></textarea>
+        </div>
+        <div class="text-modal-footer">
+          <button id="textModalApply" class="btn btn-primary" type="button">Apply Changes</button>
         </div>
       </div>
     </div>

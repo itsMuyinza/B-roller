@@ -41,10 +41,16 @@ const mediaModalClose = document.getElementById("mediaModalClose");
 const mediaModalImage = document.getElementById("mediaModalImage");
 const mediaModalVideo = document.getElementById("mediaModalVideo");
 const mediaModalTitle = document.getElementById("mediaModalTitle");
+const textModal = document.getElementById("textModal");
+const textModalClose = document.getElementById("textModalClose");
+const textModalApply = document.getElementById("textModalApply");
+const textModalInput = document.getElementById("textModalInput");
+const textModalTitle = document.getElementById("textModalTitle");
 
 let selectedTriggerJobId = null;
 let pollInFlight = false;
 let warnedNoWaveSpeed = false;
+let activeExpandedTextarea = null;
 
 function isDryRun() {
   return modeSelect.value === "dry";
@@ -83,6 +89,88 @@ function statusChip(status) {
     ? normalized
     : "unknown";
   return `<span class="status-chip status-${safe}">${esc(status || "unknown")}</span>`;
+}
+
+function autoResizeTextarea(node, minHeight = 88, maxHeight = 320) {
+  if (!node) return;
+  const min = Number(node.dataset.minHeight || minHeight);
+  const max = Number(node.dataset.maxHeight || maxHeight);
+  node.style.height = "auto";
+  const next = Math.max(min, Math.min(node.scrollHeight, max));
+  node.style.height = `${next}px`;
+}
+
+function bindAutoResizeTextarea(node, minHeight = 88, maxHeight = 320) {
+  if (!node || node.dataset.autoResizeBound === "1") return;
+  node.dataset.autoResizeBound = "1";
+  node.dataset.minHeight = String(minHeight);
+  node.dataset.maxHeight = String(maxHeight);
+  const apply = () => autoResizeTextarea(node, minHeight, maxHeight);
+  node.addEventListener("input", apply);
+  node.addEventListener("focus", apply);
+  requestAnimationFrame(apply);
+}
+
+function closeTextModal() {
+  if (!textModal) return;
+  textModal.classList.remove("open");
+  textModal.setAttribute("aria-hidden", "true");
+  activeExpandedTextarea = null;
+  if (textModalInput) {
+    textModalInput.value = "";
+  }
+}
+
+function applyTextModalChanges() {
+  if (!activeExpandedTextarea || !textModalInput) return;
+  activeExpandedTextarea.value = textModalInput.value;
+  activeExpandedTextarea.dispatchEvent(new Event("input", { bubbles: true }));
+  closeTextModal();
+}
+
+function openTextModal(textarea, label) {
+  if (!textModal || !textModalInput) return;
+  activeExpandedTextarea = textarea;
+  textModal.classList.add("open");
+  textModal.setAttribute("aria-hidden", "false");
+  textModalInput.value = textarea.value || "";
+  if (textModalTitle) {
+    textModalTitle.textContent = label || "Expanded Editor";
+  }
+  requestAnimationFrame(() => {
+    textModalInput.focus();
+    textModalInput.setSelectionRange(textModalInput.value.length, textModalInput.value.length);
+  });
+}
+
+function bindExpandableTextarea(node, label) {
+  if (!node || node.dataset.expandableBound === "1") return;
+  node.dataset.expandableBound = "1";
+  node.title = "Double-click to expand";
+  node.addEventListener("dblclick", () => {
+    openTextModal(node, label);
+  });
+  node.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      openTextModal(node, label);
+    }
+  });
+}
+
+function initializeLongTextEditors() {
+  const staticTextareas = [
+    [characterPromptInput, "Character Model Prompt", 88, 360],
+    [characterNotesInput, "Character Consistency Notes", 88, 320],
+    [characterRefsInput, "Style Reference URLs", 88, 320],
+    [styleDescriptionInput, "Style Description", 88, 240],
+    [scriptEditor, "Script Panel", 260, 740],
+  ];
+  staticTextareas.forEach(([node, label, minHeight, maxHeight]) => {
+    if (!node) return;
+    bindAutoResizeTextarea(node, minHeight, maxHeight);
+    bindExpandableTextarea(node, label);
+  });
 }
 
 function closeMediaModal() {
@@ -533,6 +621,10 @@ function renderCharacterConfig(config) {
       </div>
     </div>
   `;
+
+  [characterPromptInput, characterNotesInput, characterRefsInput, styleDescriptionInput].forEach((node) =>
+    autoResizeTextarea(node, 88, 360)
+  );
 }
 
 function scenePreview(url, type) {
@@ -569,6 +661,12 @@ function sceneActionsMarkup(canDownloadImage, canDownloadVideo) {
 function attachSceneEntryHandlers(entries) {
   entries.forEach((entry) => {
     const sceneId = entry.getAttribute("data-scene-id");
+    entry.querySelectorAll("textarea.cell-editor").forEach((textarea) => {
+      const field = (textarea.getAttribute("data-field") || "prompt").replaceAll("_", " ");
+      const label = `${sceneId || "Scene"} · ${field}`;
+      bindAutoResizeTextarea(textarea, 92, 260);
+      bindExpandableTextarea(textarea, label);
+    });
     const saveBtn = entry.querySelector('[data-action="save"]');
     const imageBtn = entry.querySelector('[data-action="image"]');
     const videoBtn = entry.querySelector('[data-action="video"]');
@@ -879,6 +977,7 @@ async function refreshOverview() {
   scriptPath.textContent = script.script_path || "Script path unavailable";
   if (document.activeElement !== scriptEditor) {
     scriptEditor.value = script.script_text || "";
+    autoResizeTextarea(scriptEditor, 260, 740);
   }
 }
 
@@ -1138,12 +1237,28 @@ mediaModalClose?.addEventListener("click", closeMediaModal);
 mediaModal?.querySelectorAll("[data-media-close='true']").forEach((node) => {
   node.addEventListener("click", closeMediaModal);
 });
+textModalClose?.addEventListener("click", closeTextModal);
+textModalApply?.addEventListener("click", applyTextModalChanges);
+textModal?.querySelectorAll("[data-text-close='true']").forEach((node) => {
+  node.addEventListener("click", closeTextModal);
+});
+textModalInput?.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+    event.preventDefault();
+    applyTextModalChanges();
+  }
+});
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && mediaModal?.classList.contains("open")) {
     closeMediaModal();
+    return;
+  }
+  if (event.key === "Escape" && textModal?.classList.contains("open")) {
+    closeTextModal();
   }
 });
 
+initializeLongTextEditors();
 refreshAll();
 setInterval(async () => {
   if (document.hidden || pollInFlight) return;

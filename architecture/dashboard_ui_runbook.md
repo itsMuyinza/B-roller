@@ -21,6 +21,7 @@ python3 dashboard/app.py
    - If a saved model already exists for that person, use `Auto-Load Saved Character` (or `Use This Model` in registry list).
 2. Edit prompts:
    - Update scene row prompts directly in the grid.
+   - For longer edits, double-click any prompt textarea to open expanded editor modal (`Ctrl/Cmd + Enter` also opens it).
    - Click `Save Prompt` on that row.
 3. Generate images:
    - Per-row: `Generate Image`

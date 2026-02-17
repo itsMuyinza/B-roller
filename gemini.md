@@ -267,6 +267,10 @@
     - Auto-binds existing character model when a matching person name appears in the story/script.
     - Added dashboard controls: `Audit Story Character`, `Auto-Load Saved Character`, registry panel, and audited candidate previews.
   - Added character registry backfill from existing completed character state so older runs become reusable automatically.
+  - UI polish pass:
+    - Improved glassmorphic spacing/contrast and cleaner control sizing.
+    - Added auto-resizing long-text textareas.
+    - Added Airtable-like expanded long-text editor modal (double-click prompt boxes or use Ctrl/Cmd+Enter).
     - Character-model-first generation control.
     - Scrollable script editor panel with save support.
     - Scene jobs queue + full trigger jobs queue with log tail.
