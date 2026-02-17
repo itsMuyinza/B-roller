@@ -1,0 +1,141 @@
+# GEMINI Project Map and State Tracking
+
+## Project
+- Name: APRT Script 3 Trigger Deployment
+- Phase: Phase 5 - T (Trigger / Deployment)
+- Last Updated: 2026-02-17
+- Owner: APRT / Muyinza
+
+## Data Schema (Data-First Rule)
+
+### Raw Input Payload
+```json
+{
+  "story_id": "string",
+  "brand": "string",
+  "title": "string",
+  "style_reference_images": ["https://... or /local/path.png"],
+  "character": {
+    "name": "string",
+    "character_model_prompt": "string",
+    "consistency_notes": "string"
+  },
+  "generation": {
+    "image_model": "google/nano-banana-pro/edit",
+    "video_model": "wavespeed-ai/wan-2.2/image-to-video",
+    "image_resolution": "1k|2k|4k",
+    "image_output_format": "png|jpeg",
+    "video_resolution": "720p",
+    "video_duration_seconds": 6,
+    "movement_amplitude": "auto|small|medium|large",
+    "generate_audio": true,
+    "bgm": true,
+    "poll_interval_seconds": 5,
+    "poll_timeout_seconds": 1200
+  },
+  "scenes": [
+    {
+      "scene_id": "string",
+      "narration": "string",
+      "image_prompt": "string",
+      "motion_prompt": "string",
+      "reference_images": ["optional URLs or local paths"]
+    }
+  ],
+  "output": {
+    "cloud_target": "supabase|cloudinary",
+    "supabase_table": "aprt_story_payloads"
+  }
+}
+```
+
+### Processed Output Payload (Cloud Payload)
+```json
+{
+  "story_id": "string",
+  "run_id": "string",
+  "status": "completed|failed",
+  "run": {
+    "started_at": "ISO-8601 UTC",
+    "ended_at": "ISO-8601 UTC"
+  },
+  "character_model": {
+    "task_id": "string",
+    "status": "succeeded|failed",
+    "image_url": "https://..."
+  },
+  "scenes": [
+    {
+      "scene_id": "string",
+      "narration": "string",
+      "image": {
+        "task_id": "string",
+        "status": "succeeded|failed",
+        "url": "https://..."
+      },
+      "video": {
+        "task_id": "string",
+        "status": "succeeded|failed",
+        "url": "https://..."
+      }
+    }
+  ],
+  "cloud_transfer": {
+    "provider": "supabase|cloudinary",
+    "status": "success|failed",
+    "destination": "table name or cloud asset URL"
+  },
+  "errors": [
+    {
+      "stage": "character|scene_image|scene_video|cloud_transfer",
+      "message": "string"
+    }
+  ]
+}
+```
+
+## Execution Architecture
+- `tools/wavespeed_story_pipeline.py`
+  - Character-first consistency generation.
+  - Scene image generation with style + character references.
+  - Scene video generation using WAN 2.2 image-to-video.
+- `tools/cloud_transfer.py`
+  - Cloud transfer to Supabase REST table.
+  - Automatic fallback transfer to Cloudinary raw asset upload.
+- `tools/run_phase5_trigger.py`
+  - Single trigger entrypoint for cron/workflow/webhook execution.
+- `tools/webhook_listener.py`
+  - Listener endpoint with optional WaveSpeed signature verification.
+
+## Automation Triggers
+- Cloud Cron: `.github/workflows/phase5_story3_trigger.yml`
+- Manual Run: `workflow_dispatch`
+- Webhook Trigger: `repository_dispatch` event `phase5_story3_trigger`
+- Local Cron bootstrap: `tools/install_local_cron.sh`
+
+## Maintenance Log
+- 2026-02-17:
+  - Added Phase 5 trigger deployment scaffolding.
+  - Added payload schema before coding (Data-First rule satisfied).
+  - Added WaveSpeed image-to-video model path `wavespeed-ai/wan-2.2/image-to-video`.
+  - Added character consistency flow: first character model, then scene generation using character model as reference.
+  - Added cloud transfer with Supabase primary + Cloudinary fallback.
+  - Added repair loop SOP notes under `architecture/`.
+  - Linked full Script 3 voiceover source file at `tools/config/script_3_voiceover.md`.
+  - Added Pinterest reference URL resolver (`og:image` extraction) to improve style-reference reliability.
+  - Validation run (dry): `python3 tools/run_phase5_trigger.py --dry-run` succeeded, scene_count=8.
+  - Validation run (live transfer): cloud upload succeeded to Cloudinary fallback.
+  - Observed error: Supabase target table missing (`PGRST205`, table `public.aprt_story_payloads` not found).
+  - Added SQL bootstrap file: `architecture/supabase_payload_table.sql`.
+  - Latest live payload destination:
+    - `https://res.cloudinary.com/dxobnvy3p/raw/upload/v1771329150/aprt/payloads/aprt_payloads_20260217T115225Z-5049e0f7.json`
+
+## Self-Annealing Repair Loop (Operationalized)
+1. Analyze: capture stack trace from `.tmp/logs` and process stderr.
+2. Patch: update Python scripts in `tools/`.
+3. Test: rerun failed stage in isolation with same payload.
+4. Update Architecture: append fix note in `architecture/wavespeed_api_learnings.md`.
+
+## Completion Criteria (Global Payload Rule)
+- Local artifacts can remain in `.tmp/` as intermediates.
+- Run is complete only after processed payload is stored in cloud destination and transfer status is `success`.

@@ -1,0 +1,81 @@
+{
+  "story_id": "script_3_hoodrat_stuff_with_my_friends",
+  "brand": "APRT",
+  "title": "I Want to Do Hoodrat Things With My Friends",
+  "voiceover_script_path": "tools/config/script_3_voiceover.md",
+  "style_reference_images": [
+    "https://pin.it/1dGMWg06y"
+  ],
+  "character": {
+    "name": "Latarian Milton",
+    "character_model_prompt": "Create a consistent stylized 3D-animated cartoon character model of a 7-year-old Black boy inspired by 2009 local news footage in Palm Beach County, Florida. Outfit: oversized tee, shorts, sneakers. Expression: calm confidence after chaos. Keep face, skin tone, hairline, and proportions fixed for all future scenes.",
+    "consistency_notes": "The same character design must appear in every scene image and video. Keep facial geometry, skin tone, and silhouette stable."
+  },
+  "generation": {
+    "image_model": "google/nano-banana-pro/edit",
+    "video_model": "wavespeed-ai/wan-2.2/image-to-video",
+    "image_resolution": "1k",
+    "image_output_format": "png",
+    "video_resolution": "720p",
+    "video_duration_seconds": 6,
+    "movement_amplitude": "auto",
+    "generate_audio": true,
+    "bgm": true,
+    "poll_interval_seconds": 5,
+    "poll_timeout_seconds": 1200
+  },
+  "scenes": [
+    {
+      "scene_id": "s01_intro",
+      "narration": "It is 2009. The early viral era is exploding with chaotic local clips and accidental icons.",
+      "image_prompt": "2009 YouTube era montage with CRT-style glow, local news overlays, and internet meme energy. Include the same child character in foreground with confident pose. Cinematic, detailed, expressive lighting.",
+      "motion_prompt": "Slow push-in camera move with floating overlays and subtle character head turn."
+    },
+    {
+      "scene_id": "s02_chase_aftermath",
+      "narration": "A seven-year-old stole grandma's Dodge Durango and crashed into parked cars.",
+      "image_prompt": "Palm Beach County street scene with a damaged Dodge Durango and police cars in background. The same child character stands calm and serious near the vehicle. Local-news documentary framing.",
+      "motion_prompt": "Handheld news camera feel, slight shake, police lights flicker, character remains calm."
+    },
+    {
+      "scene_id": "s03_quote_drop",
+      "narration": "He says: I wanted to do hoodrat things with my friends.",
+      "image_prompt": "Close-up interview moment. Reporter microphone enters frame. Same child character delivers iconic quote with deadpan confidence. Lower-third text style of local TV news, early 2009 vibe.",
+      "motion_prompt": "Micro-zoom toward the character as he speaks; subtle lip and shoulder motion."
+    },
+    {
+      "scene_id": "s04_meme_explosion",
+      "narration": "The line spreads across YouTube, Twitter, Facebook, and remixes.",
+      "image_prompt": "Digital collage of remix culture from 2009: waveform graphics, video thumbnails, social posts, and club-style remix energy. Keep the same child character as central icon.",
+      "motion_prompt": "Fast parallax movement with kinetic text and rhythm-driven camera drift."
+    },
+    {
+      "scene_id": "s05_symbolism",
+      "narration": "The quote becomes shorthand for rebellion, boredom, and youth honesty.",
+      "image_prompt": "Symbolic scene of suburban street at dusk. Same child character at center with graffiti-style words around him: rebellion, honesty, chaos. Emotional but grounded visual tone.",
+      "motion_prompt": "Gentle orbit around the character with animated text drifting in depth."
+    },
+    {
+      "scene_id": "s06_media_appearances",
+      "narration": "He appears on TV and becomes a mini celebrity before influencer culture.",
+      "image_prompt": "Split-screen of morning TV set and local interview clips. Same character appears in each panel with consistent look. Retro broadcast color grading and scanline texture.",
+      "motion_prompt": "Panels slide in with TV transition effects; subtle studio camera pan."
+    },
+    {
+      "scene_id": "s07_aftermath",
+      "narration": "As he grows up, the meme remains while life keeps moving.",
+      "image_prompt": "Time-lapse inspired composition with same character transitioning from child-era clip to later years in background timeline. Thoughtful tone, still rooted in the same visual identity.",
+      "motion_prompt": "Layered timeline motion with gentle forward movement and light leaks."
+    },
+    {
+      "scene_id": "s08_legacy_vo",
+      "narration": "Before clout was a job, there was just a kid on camera being real.",
+      "image_prompt": "Final hero shot: same child character framed like an internet legend, with old YouTube UI motifs and nostalgic early-web textures. Bold typography: Hoodrat Stuff Forever.",
+      "motion_prompt": "Epic slow zoom-out with light flicker and nostalgic particle drift."
+    }
+  ],
+  "output": {
+    "cloud_target": "supabase",
+    "supabase_table": "aprt_story_payloads"
+  }
+}

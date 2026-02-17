@@ -1,0 +1,60 @@
+name: phase5-story3-trigger
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run in dry mode (no API writes)"
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    - cron: "0 15 * * *"
+  repository_dispatch:
+    types: [phase5_story3_trigger]
+
+concurrency:
+  group: phase5-story3-trigger
+  cancel-in-progress: false
+
+jobs:
+  run-trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Run Phase 5 trigger
+        env:
+          WAVESPEED_API_KEY: ${{ secrets.WAVESPEED_API_KEY }}
+          SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          CLOUDINARY_CLOUD_NAME: ${{ secrets.CLOUDINARY_CLOUD_NAME }}
+          CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
+          CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
+        run: |
+          DRY=""
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" = "true" ]; then
+            DRY="--dry-run"
+          fi
+          python tools/run_phase5_trigger.py --input tools/config/script_3_hoodrat_payload.json --out-dir .tmp/phase5_story3 $DRY
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase5-story3-artifacts
+          path: |
+            .tmp/phase5_story3
+            .tmp/logs
