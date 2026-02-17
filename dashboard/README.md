@@ -21,6 +21,7 @@ Local Airtable-style board for scene-level prompt editing and media triggers.
   - Any run payload from Recent Runs.
 - Displays scene job queue + full trigger job queue + log tail.
 - Includes a scrollable script editor panel.
+- In serverless deployments (Vercel), scene-level jobs work; full trigger is intentionally disabled.
 
 ## Start
 ```bash

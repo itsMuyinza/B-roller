@@ -59,4 +59,5 @@ python3 dashboard/app.py
 ## Serverless Runtime Notes
 - On Vercel serverless, background threads are not durable across requests.
 - Scene image/video jobs run inline in serverless mode so row actions remain reliable.
-- `Run Full Trigger` supports serverless dry-run inline execution; live mode must run via local CLI or GitHub workflow.
+- `Run Full Trigger` is disabled in serverless mode because trigger scripts expect writable project directories.
+- Use scene-level generation buttons in Vercel, or run full trigger from local CLI/GitHub workflow.

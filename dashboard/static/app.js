@@ -483,6 +483,15 @@ async function refreshOverview() {
   const data = await requestJson("/api/overview");
   renderTriggerInfo(data);
   renderCharacter(data.character || {});
+  const runtime = data.runtime || {};
+  if (runtime.serverless) {
+    runFullTriggerBtn.disabled = true;
+    runFullTriggerBtn.title =
+      "Full trigger is disabled on Vercel serverless. Use scene-level buttons or local/GitHub workflow.";
+  } else {
+    runFullTriggerBtn.disabled = false;
+    runFullTriggerBtn.title = "";
+  }
   const script = data.script_panel || {};
   scriptPath.textContent = script.script_path || "Script path unavailable";
   if (document.activeElement !== scriptEditor) {

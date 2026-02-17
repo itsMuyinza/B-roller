@@ -1335,65 +1335,10 @@ def start_trigger_job(dry_run: bool, provider: str) -> Dict[str, Any]:
         cmd.append("--dry-run")
 
     if is_serverless_runtime():
-        if not dry_run:
-            raise DashboardError(
-                "Run Full Trigger (live) is disabled on Vercel serverless. "
-                "Use dry run here, or run live from local CLI/GitHub workflow."
-            )
-
-        insert_trigger_job(
-            {
-                "id": job_id,
-                "requested_at": requested_at,
-                "mode": mode,
-                "provider": provider,
-                "status": "running",
-                "pid": None,
-                "log_path": str(log_path.resolve()),
-            }
+        raise DashboardError(
+            "Run Full Trigger is disabled on Vercel serverless (read-only filesystem). "
+            "Use scene-level buttons here, or run full trigger from local CLI/GitHub workflow."
         )
-        try:
-            proc = subprocess.run(  # noqa: S603
-                cmd,
-                cwd=str(ROOT),
-                capture_output=True,
-                text=True,
-                env=os.environ.copy(),
-                timeout=180,
-                check=False,
-            )
-            combined = ""
-            if proc.stdout:
-                combined += proc.stdout
-            if proc.stderr:
-                combined += "\n" + proc.stderr
-            log_path.write_text(combined, encoding="utf-8")
-            status = "completed" if proc.returncode == 0 else "failed"
-            update_trigger_job(job_id, status=status, exit_code=proc.returncode)
-            record = {
-                "id": job_id,
-                "requested_at": requested_at,
-                "mode": mode,
-                "provider": provider,
-                "status": status,
-                "pid": None,
-                "log_path": str(log_path.resolve()),
-            }
-            latest = next((item for item in list_trigger_jobs(limit=20) if item["id"] == job_id), None)
-            return latest or record
-        except subprocess.TimeoutExpired:
-            log_path.write_text("Trigger timed out in serverless runtime.", encoding="utf-8")
-            update_trigger_job(job_id, status="failed", exit_code=124)
-            latest = next((item for item in list_trigger_jobs(limit=20) if item["id"] == job_id), None)
-            return latest or {
-                "id": job_id,
-                "requested_at": requested_at,
-                "mode": mode,
-                "provider": provider,
-                "status": "failed",
-                "pid": None,
-                "log_path": str(log_path.resolve()),
-            }
 
     env = os.environ.copy()
     log_handle = log_path.open("a", encoding="utf-8")
@@ -1460,6 +1405,9 @@ def api_overview() -> Any:
             },
             "script_panel": read_script_panel(),
             "character": get_character_state(),
+            "runtime": {
+                "serverless": is_serverless_runtime(),
+            },
             "active_trigger_jobs": len(ACTIVE_TRIGGER_JOBS),
             "active_scene_jobs": len(ACTIVE_SCENE_JOBS),
         }

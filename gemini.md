@@ -206,7 +206,7 @@
     - Added anti-anime style lock (`not anime`, `not Dragon Ball`, `not Goku`) to character and scene generation prompts.
   - Added serverless runtime compatibility fixes:
     - Scene jobs run inline on serverless to avoid background-thread loss.
-    - Full trigger on serverless now supports deterministic dry-run inline execution and returns clear message for live mode.
+    - Full trigger is disabled on serverless due read-only filesystem expectations in trigger scripts; UI now communicates this clearly.
   - Fixed simulated dry-run media preview handling to prevent broken-media rendering.
   - Validation run (dry): `python3 tools/run_phase5_trigger.py --dry-run` succeeded, scene_count=8.
   - Validation run (live transfer): cloud upload succeeded to Cloudinary fallback.
