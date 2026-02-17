@@ -4,3 +4,4 @@
 output/playwright/
 __pycache__/
 *.pyc
+.vercel
