@@ -45,6 +45,10 @@ Open:
 - `GET /api/character/config`
 - `PATCH /api/character/config`
 - `POST /api/character/generate`
+- `GET /api/character/audit`
+- `POST /api/character/audit`
+- `GET /api/character/registry`
+- `POST /api/character/auto-bind`
 - `GET /api/script`
 - `PATCH /api/script`
 - `GET /api/scenes/<scene_id>/download/<image|video>`

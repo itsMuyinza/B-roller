@@ -16,6 +16,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 import yaml
@@ -39,6 +40,10 @@ DEFAULT_SCRIPT_PATH = ROOT / "tools" / "config" / "script_3_voiceover.md"
 
 PYTHON_BIN = os.environ.get("PYTHON", "python3")
 WAVESPEED_API_BASE = "https://api.wavespeed.ai/api/v3"
+WIKIPEDIA_API = "https://en.wikipedia.org/w/api.php"
+WIKIMEDIA_COMMONS_API = "https://commons.wikimedia.org/w/api.php"
+DUCKDUCKGO_LITE_SEARCH = "https://lite.duckduckgo.com/lite/"
+AUDIT_HTTP_HEADERS = {"User-Agent": "APRT-Broller/1.0 (+dashboard)"}
 SUCCESS_STATUSES = {"succeeded", "completed", "success"}
 FAIL_STATUSES = {"failed", "error", "canceled", "cancelled"}
 
@@ -164,7 +169,41 @@ def init_db() -> None:
                 value text not null,
                 updated_at text not null
             );
+
+            create table if not exists character_registry (
+                id text primary key,
+                name text not null,
+                name_key text not null,
+                aliases text not null default '[]',
+                image_url text not null,
+                source_url text,
+                source_label text,
+                audit_score real not null default 0,
+                audit_status text not null default 'verified',
+                audit_log text not null default '{}',
+                created_at text not null,
+                updated_at text not null,
+                last_used_at text not null
+            );
+
+            create table if not exists character_audit_events (
+                id text primary key,
+                requested_at text not null,
+                story_id text,
+                target_name text not null,
+                status text not null,
+                score real,
+                selected_image_url text,
+                selected_source_url text,
+                details text not null
+            );
             """
+        )
+        conn.execute(
+            "create index if not exists idx_character_registry_name_key on character_registry(name_key)"
+        )
+        conn.execute(
+            "create index if not exists idx_character_audit_events_target on character_audit_events(target_name)"
         )
 
 
@@ -397,6 +436,7 @@ def enforce_scene_prompts_with_character_name(
 def get_character_config() -> Dict[str, Any]:
     config = load_payload_config()
     character = config.get("character", {}) if isinstance(config.get("character"), dict) else {}
+    identity_cfg = get_character_identity_config(config)
     refs = config.get("style_reference_images", [])
     if not isinstance(refs, list):
         refs = []
@@ -410,6 +450,8 @@ def get_character_config() -> Dict[str, Any]:
         consistency_notes=notes,
         style_description=style_description,
     )
+    inferred_target = infer_story_target_character_name()
+    registry_match = get_character_registry_record_by_name(inferred_target) if inferred_target else None
     return {
         "name": name,
         "character_model_prompt": model_prompt,
@@ -417,8 +459,18 @@ def get_character_config() -> Dict[str, Any]:
         "style_description": style_description,
         "use_style_reference_images": should_use_style_reference_images(config),
         "style_reference_images": [str(item).strip() for item in refs if str(item).strip()],
+        "character_identity": identity_cfg,
         "style_guardrail": style_guardrail_text(style_description),
         "effective_prompt": effective_prompt,
+        "inferred_target_name": inferred_target,
+        "registry_match": {
+            "id": registry_match.get("id"),
+            "name": registry_match.get("name"),
+            "image_url": registry_match.get("image_url"),
+            "audit_score": registry_match.get("audit_score"),
+        }
+        if isinstance(registry_match, dict)
+        else None,
     }
 
 
@@ -451,6 +503,7 @@ def parse_style_reference_images(raw: Any) -> List[str]:
 def update_character_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     config = load_payload_config()
     character = config.get("character", {}) if isinstance(config.get("character"), dict) else {}
+    identity_cfg = get_character_identity_config(config)
 
     if "name" in payload:
         character["name"] = str(payload.get("name", "")).strip()
@@ -471,6 +524,53 @@ def update_character_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     if "style_reference_images" in payload:
         refs = parse_style_reference_images(payload.get("style_reference_images"))
         config["style_reference_images"] = refs
+
+    if "character_identity" in payload and isinstance(payload.get("character_identity"), dict):
+        incoming = payload.get("character_identity", {})
+        if "audit_enabled" in incoming:
+            identity_cfg["audit_enabled"] = bool(incoming.get("audit_enabled"))
+        if "auto_reuse_saved_model" in incoming:
+            identity_cfg["auto_reuse_saved_model"] = bool(incoming.get("auto_reuse_saved_model"))
+        if "min_confidence_score" in incoming:
+            try:
+                identity_cfg["min_confidence_score"] = max(0.2, min(0.95, float(incoming.get("min_confidence_score"))))
+            except Exception:
+                pass
+        if "sources" in incoming and isinstance(incoming.get("sources"), list):
+            identity_cfg["sources"] = [
+                str(item).strip().lower()
+                for item in incoming.get("sources", [])
+                if str(item).strip().lower() in {"duckduckgo_web", "duckduckgo", "wikipedia", "wikimedia_commons"}
+            ]
+            identity_cfg["sources"] = [
+                "duckduckgo_web" if source == "duckduckgo" else source for source in identity_cfg["sources"]
+            ]
+            identity_cfg["sources"] = list(dict.fromkeys(identity_cfg["sources"])) or identity_cfg["sources"]
+
+    if "audit_enabled" in payload:
+        identity_cfg["audit_enabled"] = bool(payload.get("audit_enabled"))
+    if "auto_reuse_saved_model" in payload:
+        identity_cfg["auto_reuse_saved_model"] = bool(payload.get("auto_reuse_saved_model"))
+    if "min_confidence_score" in payload:
+        try:
+            identity_cfg["min_confidence_score"] = max(0.2, min(0.95, float(payload.get("min_confidence_score"))))
+        except Exception:
+            pass
+    if "audit_sources" in payload and isinstance(payload.get("audit_sources"), list):
+        cleaned_sources: List[str] = []
+        for item in payload.get("audit_sources", []):
+            source = str(item).strip().lower()
+            if source == "duckduckgo":
+                source = "duckduckgo_web"
+            if source in {"duckduckgo_web", "wikipedia", "wikimedia_commons"} and source not in cleaned_sources:
+                cleaned_sources.append(source)
+        if cleaned_sources:
+            identity_cfg["sources"] = cleaned_sources
+
+    if not isinstance(identity_cfg.get("sources"), list) or not identity_cfg.get("sources"):
+        identity_cfg["sources"] = ["duckduckgo_web", "wikipedia", "wikimedia_commons"]
+
+    config["character_identity"] = identity_cfg
 
     saved_path = save_payload_config(config)
     sync_scenes_from_payload()
@@ -627,9 +727,13 @@ def bootstrap_once() -> None:
         cfg = load_payload_config()
         character = cfg.get("character", {}) if isinstance(cfg.get("character"), dict) else {}
         character_name = str(character.get("name", "")).strip()
+        if not character_name:
+            character_name = ensure_story_character_name_persisted()
+            cfg = load_payload_config()
         style_description = get_style_description_from_config(cfg)
         if character_name:
             enforce_scene_prompts_with_character_name(character_name, style_description, persist_payload=False)
+            backfill_registry_from_current_character_state()
         BOOTSTRAPPED = True
 
 
@@ -984,6 +1088,817 @@ def maybe_resolve_reference_url(url: str) -> str:
         return url
 
 
+def normalize_name_key(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(name or "").lower())
+
+
+def parse_json_or_default(raw: Any, fallback: Any) -> Any:
+    if isinstance(raw, (dict, list)):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
+        return fallback
+    try:
+        return json.loads(raw)
+    except Exception:
+        return fallback
+
+
+def get_character_identity_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    cfg = config if isinstance(config, dict) else load_payload_config()
+    raw = cfg.get("character_identity", {}) if isinstance(cfg.get("character_identity"), dict) else {}
+    sources_raw = raw.get("sources", ["duckduckgo_web", "wikipedia", "wikimedia_commons"])
+    if not isinstance(sources_raw, list):
+        sources_raw = ["duckduckgo_web", "wikipedia", "wikimedia_commons"]
+
+    allowed_sources = {"duckduckgo_web", "wikipedia", "wikimedia_commons"}
+    normalized_sources: List[str] = []
+    for item in sources_raw:
+        source = str(item or "").strip().lower()
+        if source == "duckduckgo":
+            source = "duckduckgo_web"
+        if source in allowed_sources and source not in normalized_sources:
+            normalized_sources.append(source)
+    if not normalized_sources:
+        normalized_sources = ["duckduckgo_web", "wikipedia", "wikimedia_commons"]
+
+    raw_min = raw.get("min_confidence_score", 0.6)
+    try:
+        min_score = float(raw_min)
+    except Exception:
+        min_score = 0.6
+    min_score = max(0.2, min(0.95, min_score))
+
+    return {
+        "audit_enabled": bool(raw.get("audit_enabled", True)),
+        "auto_reuse_saved_model": bool(raw.get("auto_reuse_saved_model", True)),
+        "min_confidence_score": min_score,
+        "sources": normalized_sources,
+    }
+
+
+def collect_story_context() -> Dict[str, Any]:
+    cfg = load_payload_config()
+    character = cfg.get("character", {}) if isinstance(cfg.get("character"), dict) else {}
+    name = str(character.get("name", "")).strip()
+    title = str(cfg.get("title", "")).strip()
+    story_id = str(cfg.get("story_id", "")).strip()
+    scenes = cfg.get("scenes", [])
+    narrations: List[str] = []
+    if isinstance(scenes, list):
+        narrations = [str(item.get("narration", "")).strip() for item in scenes if isinstance(item, dict)]
+    script = read_script_panel().get("script_text", "")
+    parts = [title, name, story_id, script] + narrations
+    merged_text = "\n".join([part for part in parts if isinstance(part, str) and part.strip()])
+    return {
+        "story_id": story_id,
+        "title": title,
+        "character_name": name,
+        "script_text": script,
+        "narrations": narrations,
+        "merged_text": merged_text,
+    }
+
+
+def extract_story_person_candidates(text: str, max_names: int = 10) -> List[str]:
+    if not text.strip():
+        return []
+    candidates: List[str] = []
+    seen: set[str] = set()
+
+    def add_candidate(raw: str) -> None:
+        cleaned = re.sub(r"\s+", " ", raw).strip(" .,:;!?\"'()[]{}")
+        if not cleaned:
+            return
+        words = cleaned.split()
+        if len(words) < 2 or len(words) > 4:
+            return
+        if not all(re.match(r"^[A-Z][a-zA-Z'-]+$", word) for word in words):
+            return
+        banned = {
+            "The Internet",
+            "Good Morning",
+            "Palm Beach",
+            "Script Panel",
+            "Trigger Dashboard",
+        }
+        if cleaned in banned:
+            return
+        key = normalize_name_key(cleaned)
+        if not key or key in seen:
+            return
+        seen.add(key)
+        candidates.append(cleaned)
+
+    for match in re.findall(r"\bnamed\s+([A-Z][a-zA-Z'-]+(?:\s+[A-Z][a-zA-Z'-]+){1,3})", text):
+        add_candidate(match)
+    for match in re.findall(r"\b([A-Z][a-zA-Z'-]+(?:\s+[A-Z][a-zA-Z'-]+){1,3})\b", text):
+        add_candidate(match)
+        if len(candidates) >= max_names:
+            break
+    return candidates[:max_names]
+
+
+def infer_story_target_character_name() -> str:
+    context = collect_story_context()
+    existing = str(context.get("character_name", "")).strip()
+    if existing:
+        return existing
+    candidates = extract_story_person_candidates(str(context.get("merged_text", "")))
+    return candidates[0] if candidates else ""
+
+
+def set_character_audit_state(state: Dict[str, Any]) -> None:
+    payload = json.dumps(state, ensure_ascii=True)
+    set_meta("character_audit_state", payload)
+
+
+def get_character_audit_state() -> Dict[str, Any]:
+    raw = get_meta("character_audit_state", "")
+    parsed = parse_json_or_default(raw, {})
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def list_character_registry(limit: int = 60) -> List[Dict[str, Any]]:
+    with db_conn() as conn:
+        rows = conn.execute(
+            """
+            select id, name, name_key, aliases, image_url, source_url, source_label,
+                   audit_score, audit_status, audit_log, created_at, updated_at, last_used_at
+            from character_registry
+            order by last_used_at desc, updated_at desc
+            limit ?
+            """,
+            (limit,),
+        ).fetchall()
+    items: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["aliases"] = parse_json_or_default(item.get("aliases", "[]"), [])
+        item["audit_log"] = parse_json_or_default(item.get("audit_log", "{}"), {})
+        items.append(item)
+    return items
+
+
+def count_character_registry() -> int:
+    with db_conn() as conn:
+        row = conn.execute("select count(1) as n from character_registry").fetchone()
+    return int(row["n"]) if row is not None else 0
+
+
+def get_character_registry_record_by_name(name: str) -> Optional[Dict[str, Any]]:
+    name = str(name or "").strip()
+    if not name:
+        return None
+    name_key = normalize_name_key(name)
+    with db_conn() as conn:
+        row = conn.execute(
+            """
+            select id, name, name_key, aliases, image_url, source_url, source_label,
+                   audit_score, audit_status, audit_log, created_at, updated_at, last_used_at
+            from character_registry
+            where name_key = ?
+            order by updated_at desc
+            limit 1
+            """,
+            (name_key,),
+        ).fetchone()
+    if row is not None:
+        record = dict(row)
+        record["aliases"] = parse_json_or_default(record.get("aliases", "[]"), [])
+        record["audit_log"] = parse_json_or_default(record.get("audit_log", "{}"), {})
+        return record
+
+    # alias fallback
+    for record in list_character_registry(limit=200):
+        aliases = record.get("aliases", [])
+        if not isinstance(aliases, list):
+            continue
+        alias_keys = {normalize_name_key(str(alias)) for alias in aliases}
+        if name_key in alias_keys:
+            return record
+    return None
+
+
+def upsert_character_registry_record(
+    *,
+    name: str,
+    image_url: str,
+    source_url: Optional[str],
+    source_label: Optional[str],
+    audit_score: float,
+    audit_status: str,
+    audit_log: Dict[str, Any],
+) -> Dict[str, Any]:
+    now = utc_now()
+    existing = get_character_registry_record_by_name(name)
+    aliases_list: List[str] = []
+    if existing is not None:
+        existing_aliases = existing.get("aliases", [])
+        if isinstance(existing_aliases, list):
+            aliases_list = [str(item).strip() for item in existing_aliases if str(item).strip()]
+    if name not in aliases_list:
+        aliases_list.append(name)
+
+    if existing is None:
+        record_id = f"chr-{uuid.uuid4().hex[:12]}"
+        with db_conn() as conn:
+            conn.execute(
+                """
+                insert into character_registry(
+                    id, name, name_key, aliases, image_url, source_url, source_label,
+                    audit_score, audit_status, audit_log, created_at, updated_at, last_used_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record_id,
+                    name,
+                    normalize_name_key(name),
+                    json.dumps(aliases_list, ensure_ascii=True),
+                    image_url,
+                    source_url or "",
+                    source_label or "",
+                    float(audit_score),
+                    audit_status,
+                    json.dumps(audit_log, ensure_ascii=True),
+                    now,
+                    now,
+                    now,
+                ),
+            )
+    else:
+        record_id = existing["id"]
+        with db_conn() as conn:
+            conn.execute(
+                """
+                update character_registry
+                set name = ?, aliases = ?, image_url = ?, source_url = ?, source_label = ?,
+                    audit_score = ?, audit_status = ?, audit_log = ?, updated_at = ?, last_used_at = ?
+                where id = ?
+                """,
+                (
+                    name,
+                    json.dumps(aliases_list, ensure_ascii=True),
+                    image_url,
+                    source_url or "",
+                    source_label or "",
+                    float(audit_score),
+                    audit_status,
+                    json.dumps(audit_log, ensure_ascii=True),
+                    now,
+                    now,
+                    record_id,
+                ),
+            )
+    record = get_character_registry_record_by_name(name)
+    if record is None:
+        raise DashboardError("Character registry upsert failed.")
+    return record
+
+
+def mark_character_registry_used(record_id: str) -> None:
+    with db_conn() as conn:
+        conn.execute(
+            "update character_registry set last_used_at = ?, updated_at = ? where id = ?",
+            (utc_now(), utc_now(), record_id),
+        )
+
+
+def insert_character_audit_event(
+    *,
+    story_id: str,
+    target_name: str,
+    status: str,
+    score: float,
+    selected_image_url: str,
+    selected_source_url: str,
+    details: Dict[str, Any],
+) -> None:
+    with db_conn() as conn:
+        conn.execute(
+            """
+            insert into character_audit_events(
+                id, requested_at, story_id, target_name, status, score,
+                selected_image_url, selected_source_url, details
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"audit-{uuid.uuid4().hex[:12]}",
+                utc_now(),
+                story_id,
+                target_name,
+                status,
+                float(score),
+                selected_image_url,
+                selected_source_url,
+                json.dumps(details, ensure_ascii=True),
+            ),
+        )
+
+
+def strip_html_tags(text: str) -> str:
+    raw = str(text or "")
+    raw = re.sub(r"<script[^>]*>.*?</script>", " ", raw, flags=re.IGNORECASE | re.DOTALL)
+    raw = re.sub(r"<style[^>]*>.*?</style>", " ", raw, flags=re.IGNORECASE | re.DOTALL)
+    raw = re.sub(r"<[^>]+>", " ", raw)
+    raw = html.unescape(raw)
+    return re.sub(r"\s+", " ", raw).strip()
+
+
+def compact_text(text: str, max_len: int = 260) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text or "").strip())
+    return cleaned[:max_len]
+
+
+def decode_duckduckgo_redirect(url: str) -> str:
+    value = str(url or "").strip()
+    if not value:
+        return ""
+    parsed = urlparse(value)
+    host = (parsed.netloc or "").lower()
+    if "duckduckgo.com" not in host:
+        return value
+    query = parse_qs(parsed.query)
+    uddg = query.get("uddg", [])
+    if uddg:
+        return unquote(uddg[0])
+    return value
+
+
+def extract_meta_image_url(html_text: str) -> str:
+    patterns = [
+        r'<meta[^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\']',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html_text, flags=re.IGNORECASE)
+        if match:
+            return html.unescape(match.group(1).strip())
+    return ""
+
+
+def score_candidate_identity(
+    *,
+    target_name: str,
+    candidate_text: str,
+    image_url: str,
+    source_bias: float,
+) -> Tuple[int, float]:
+    tokens = [token.lower() for token in re.findall(r"[A-Za-z0-9]+", target_name) if len(token) >= 2]
+    haystack = str(candidate_text or "").lower()
+    matched_tokens = sum(
+        1
+        for token in tokens
+        if re.search(rf"\b{re.escape(token)}\b", haystack) is not None
+    )
+    coverage = matched_tokens / max(1, len(tokens))
+    score = coverage + float(source_bias)
+    if normalize_name_key(target_name) and normalize_name_key(target_name) in normalize_name_key(candidate_text):
+        score += 0.22
+    if str(image_url or "").strip():
+        score += 0.12
+
+    lowered = haystack.lower()
+    if any(flag in lowered for flag in ("disambiguation", "list of", "category:", "fictional character")):
+        score -= 0.25
+    if any(flag in lowered for flag in ("dragon ball", "goku", "naruto", "anime character")):
+        score -= 0.18
+    if "logo" in lowered:
+        score -= 0.12
+
+    return matched_tokens, max(0.0, min(1.0, round(score, 3)))
+
+
+def search_wikipedia_candidates(target_name: str) -> List[Dict[str, Any]]:
+    search_response = requests.get(
+        WIKIPEDIA_API,
+        params={
+            "action": "query",
+            "list": "search",
+            "srsearch": target_name,
+            "srlimit": 8,
+            "format": "json",
+            "utf8": 1,
+        },
+        timeout=20,
+        headers=AUDIT_HTTP_HEADERS,
+    )
+    search_response.raise_for_status()
+    search_data = search_response.json()
+    search_items = search_data.get("query", {}).get("search", [])
+    titles = [str(item.get("title", "")).strip() for item in search_items if isinstance(item, dict)]
+    titles = [title for title in titles if title]
+
+    out: List[Dict[str, Any]] = []
+    for title in titles[:6]:
+        detail_response = requests.get(
+            WIKIPEDIA_API,
+            params={
+                "action": "query",
+                "prop": "pageimages|extracts|info",
+                "titles": title,
+                "pithumbsize": 1200,
+                "exintro": 1,
+                "explaintext": 1,
+                "inprop": "url",
+                "format": "json",
+                "utf8": 1,
+            },
+            timeout=20,
+            headers=AUDIT_HTTP_HEADERS,
+        )
+        detail_response.raise_for_status()
+        pages = detail_response.json().get("query", {}).get("pages", {})
+        if not isinstance(pages, dict):
+            continue
+        for page in pages.values():
+            if not isinstance(page, dict):
+                continue
+            page_title = str(page.get("title", title)).strip()
+            extract = str(page.get("extract", "")).strip()
+            fullurl = str(page.get("fullurl", "")).strip()
+            thumb = page.get("thumbnail", {}) if isinstance(page.get("thumbnail"), dict) else {}
+            image_url = str(thumb.get("source", "")).strip()
+            matched_tokens, score = score_candidate_identity(
+                target_name=target_name,
+                candidate_text=f"{page_title} {extract}",
+                image_url=image_url,
+                source_bias=0.1,
+            )
+            out.append(
+                {
+                    "source": "wikipedia",
+                    "title": page_title,
+                    "image_url": image_url,
+                    "source_url": fullurl,
+                    "summary": compact_text(extract),
+                    "matched_tokens": matched_tokens,
+                    "score": score,
+                }
+            )
+    return out
+
+
+def search_wikimedia_commons_candidates(target_name: str) -> List[Dict[str, Any]]:
+    response = requests.get(
+        WIKIMEDIA_COMMONS_API,
+        params={
+            "action": "query",
+            "generator": "search",
+            "gsrsearch": target_name,
+            "gsrnamespace": 6,
+            "gsrlimit": 10,
+            "prop": "imageinfo",
+            "iiprop": "url|extmetadata",
+            "iiurlwidth": 1400,
+            "format": "json",
+            "utf8": 1,
+        },
+        timeout=20,
+        headers=AUDIT_HTTP_HEADERS,
+    )
+    response.raise_for_status()
+    pages = response.json().get("query", {}).get("pages", {})
+    if not isinstance(pages, dict):
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for page in pages.values():
+        if not isinstance(page, dict):
+            continue
+        title = str(page.get("title", "")).strip()
+        infos = page.get("imageinfo", [])
+        if not isinstance(infos, list) or not infos:
+            continue
+        info = infos[0] if isinstance(infos[0], dict) else {}
+        image_url = str(info.get("thumburl") or info.get("url") or "").strip()
+        source_url = str(info.get("descriptionurl") or "").strip()
+        ext = info.get("extmetadata", {}) if isinstance(info.get("extmetadata"), dict) else {}
+        desc_html = (
+            ext.get("ImageDescription", {}).get("value", "")
+            if isinstance(ext.get("ImageDescription"), dict)
+            else ""
+        )
+        description = compact_text(strip_html_tags(str(desc_html)))
+        matched_tokens, score = score_candidate_identity(
+            target_name=target_name,
+            candidate_text=f"{title} {description}",
+            image_url=image_url,
+            source_bias=0.08,
+        )
+        out.append(
+            {
+                "source": "wikimedia_commons",
+                "title": title,
+                "image_url": image_url,
+                "source_url": source_url,
+                "summary": description,
+                "matched_tokens": matched_tokens,
+                "score": score,
+            }
+        )
+    return out
+
+
+def search_duckduckgo_candidates(target_name: str) -> List[Dict[str, Any]]:
+    response = requests.get(
+        DUCKDUCKGO_LITE_SEARCH,
+        params={"q": target_name},
+        timeout=20,
+        headers=AUDIT_HTTP_HEADERS,
+    )
+    response.raise_for_status()
+    body = response.text
+    pattern = re.compile(
+        r"<a rel=\"nofollow\" href=\"([^\"]+)\" class='result-link'>(.*?)</a>",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    out: List[Dict[str, Any]] = []
+    for match in pattern.finditer(body):
+        if len(out) >= 8:
+            break
+        href = html.unescape(match.group(1))
+        title_html = match.group(2)
+        title = compact_text(strip_html_tags(title_html), max_len=160)
+        window = body[match.end() : match.end() + 2500]
+        snippet_match = re.search(r"<td class='result-snippet'>(.*?)</td>", window, flags=re.IGNORECASE | re.DOTALL)
+        snippet = compact_text(strip_html_tags(snippet_match.group(1)) if snippet_match else "", max_len=220)
+        resolved_url = decode_duckduckgo_redirect(href)
+        if not is_url(resolved_url):
+            continue
+
+        page_title = ""
+        page_image_url = ""
+        try:
+            page_response = requests.get(resolved_url, timeout=16, headers=AUDIT_HTTP_HEADERS, allow_redirects=True)
+            ctype = str(page_response.headers.get("Content-Type", "")).lower()
+            if "text/html" in ctype:
+                page_html = page_response.text[:300000]
+                page_title_match = re.search(r"<title[^>]*>(.*?)</title>", page_html, flags=re.IGNORECASE | re.DOTALL)
+                if page_title_match:
+                    page_title = compact_text(strip_html_tags(page_title_match.group(1)), max_len=160)
+                page_image_url = extract_meta_image_url(page_html)
+        except Exception:
+            page_title = ""
+            page_image_url = ""
+
+        matched_tokens, score = score_candidate_identity(
+            target_name=target_name,
+            candidate_text=f"{title} {snippet} {page_title}",
+            image_url=page_image_url,
+            source_bias=0.12,
+        )
+        out.append(
+            {
+                "source": "duckduckgo_web",
+                "title": title,
+                "image_url": page_image_url,
+                "source_url": resolved_url,
+                "summary": snippet,
+                "matched_tokens": matched_tokens,
+                "score": score,
+            }
+        )
+    return out
+
+
+def dedupe_audit_candidates(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    dedup: Dict[str, Dict[str, Any]] = {}
+    for item in candidates:
+        title = str(item.get("title", "")).strip()
+        source_url = str(item.get("source_url", "")).strip()
+        image_url = str(item.get("image_url", "")).strip()
+        source = str(item.get("source", "")).strip()
+        key = "|".join(
+            [
+                normalize_name_key(title),
+                normalize_name_key(source_url),
+                normalize_name_key(image_url),
+                normalize_name_key(source),
+            ]
+        )
+        current = dedup.get(key)
+        if current is None or float(item.get("score", 0)) > float(current.get("score", 0)):
+            dedup[key] = item
+    return sorted(dedup.values(), key=lambda item: float(item.get("score", 0)), reverse=True)
+
+
+def run_character_identity_audit(
+    target_name: str,
+    min_score: float = 0.6,
+    sources: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    target_name = str(target_name or "").strip()
+    if not target_name:
+        raise DashboardError("Character audit requires a target name.")
+
+    cfg = load_payload_config()
+    identity_cfg = get_character_identity_config(cfg)
+    selected_sources = (
+        [
+            "duckduckgo_web" if str(source).strip().lower() == "duckduckgo" else str(source).strip().lower()
+            for source in (sources or identity_cfg.get("sources", []))
+            if str(source).strip()
+        ]
+        or ["duckduckgo_web", "wikipedia", "wikimedia_commons"]
+    )
+    selected_sources = [
+        source for source in selected_sources if source in {"duckduckgo_web", "wikipedia", "wikimedia_commons"}
+    ]
+    selected_sources = list(dict.fromkeys(selected_sources))
+    threshold = max(0.2, min(0.95, float(min_score)))
+
+    candidates: List[Dict[str, Any]] = []
+    source_errors: List[str] = []
+
+    for source in selected_sources:
+        try:
+            if source == "duckduckgo_web":
+                candidates.extend(search_duckduckgo_candidates(target_name))
+            elif source == "wikipedia":
+                candidates.extend(search_wikipedia_candidates(target_name))
+            elif source == "wikimedia_commons":
+                candidates.extend(search_wikimedia_commons_candidates(target_name))
+        except Exception as exc:  # noqa: BLE001
+            source_errors.append(f"{source}: {exc}")
+
+    ranked = dedupe_audit_candidates(candidates)
+    verified = [
+        item
+        for item in ranked
+        if str(item.get("image_url", "")).strip() and float(item.get("score", 0)) >= threshold
+    ]
+    review_threshold = max(0.35, threshold * 0.72)
+    review = [
+        item
+        for item in ranked
+        if str(item.get("image_url", "")).strip() and float(item.get("score", 0)) >= review_threshold
+    ]
+    best_score = float(ranked[0].get("score", 0)) if ranked else 0.0
+
+    status = "failed"
+    if verified:
+        status = "verified"
+    elif ranked:
+        status = "needs_review"
+
+    selected_images = [str(item.get("image_url")) for item in verified[:3]]
+    selected_sources_urls = [str(item.get("source_url")) for item in verified[:3] if str(item.get("source_url", "")).strip()]
+    review_images = [str(item.get("image_url")) for item in review[:3]]
+    review_sources_urls = [str(item.get("source_url")) for item in review[:3] if str(item.get("source_url", "")).strip()]
+
+    context = collect_story_context()
+    result = {
+        "target_name": target_name,
+        "status": status,
+        "score": best_score,
+        "sources_used": selected_sources,
+        "source_errors": source_errors,
+        "selected_reference_images": selected_images,
+        "selected_source_urls": selected_sources_urls,
+        "review_reference_images": review_images,
+        "review_source_urls": review_sources_urls,
+        "candidates": ranked[:12],
+        "requested_at": utc_now(),
+        "story_id": str(context.get("story_id", "")).strip(),
+    }
+
+    existing_record = get_character_registry_record_by_name(target_name)
+    if existing_record is not None and str(existing_record.get("image_url", "")).strip():
+        upsert_character_registry_record(
+            name=target_name,
+            image_url=str(existing_record.get("image_url", "")),
+            source_url=str(existing_record.get("source_url", "")).strip() or (selected_sources_urls[0] if selected_sources_urls else ""),
+            source_label=str(existing_record.get("source_label", "")).strip() or "registry_existing",
+            audit_score=best_score,
+            audit_status=status,
+            audit_log=result,
+        )
+
+    set_character_audit_state(result)
+    insert_character_audit_event(
+        story_id=result["story_id"],
+        target_name=target_name,
+        status=status,
+        score=best_score,
+        selected_image_url=selected_images[0] if selected_images else "",
+        selected_source_url=selected_sources_urls[0] if selected_sources_urls else "",
+        details=result,
+    )
+    return result
+
+
+def auto_bind_character_from_registry(force: bool = False) -> Dict[str, Any]:
+    if not force:
+        cfg = load_payload_config()
+        identity_cfg = get_character_identity_config(cfg)
+        if not bool(identity_cfg.get("auto_reuse_saved_model", True)):
+            return {"bound": False, "reason": "auto_reuse_disabled"}
+
+    state = get_character_state()
+    current_status = str(state.get("status") or "").lower()
+    if current_status == "running" and not force:
+        return {"bound": False, "reason": "character_generation_running"}
+
+    target_name = infer_story_target_character_name()
+    if not target_name:
+        return {"bound": False, "reason": "no_story_character_detected"}
+
+    record = get_character_registry_record_by_name(target_name)
+    if record is None:
+        return {"bound": False, "reason": "no_registry_match", "target_name": target_name}
+
+    existing_image = str(state.get("image_url") or "").strip()
+    if existing_image and not force and existing_image != str(record.get("image_url", "")).strip():
+        return {"bound": False, "reason": "character_image_already_set", "target_name": target_name}
+
+    task_id = f"registry-{record['id']}"
+    update_character_state(
+        status="completed",
+        task_id=task_id,
+        image_url=str(record.get("image_url", "")),
+        last_error=None,
+    )
+    mark_character_registry_used(record["id"])
+    audit_state = {
+        "target_name": target_name,
+        "status": "reused",
+        "score": float(record.get("audit_score", 0)),
+        "selected_reference_images": [str(record.get("image_url", ""))],
+        "selected_source_urls": [str(record.get("source_url", ""))] if str(record.get("source_url", "")).strip() else [],
+        "candidates": [],
+        "requested_at": utc_now(),
+        "story_id": str(load_payload_config().get("story_id", "")).strip(),
+        "registry_id": record["id"],
+    }
+    set_character_audit_state(audit_state)
+    return {
+        "bound": True,
+        "target_name": target_name,
+        "registry_record": record,
+    }
+
+
+def save_character_to_registry_from_state(image_url: str, source: str) -> Optional[Dict[str, Any]]:
+    if not str(image_url or "").strip():
+        return None
+    target_name = infer_story_target_character_name()
+    if not target_name:
+        return None
+    audit_state = get_character_audit_state()
+    selected_sources = audit_state.get("selected_source_urls", [])
+    source_url = ""
+    if isinstance(selected_sources, list) and selected_sources:
+        source_url = str(selected_sources[0])
+    if source == "registry_reuse":
+        existing = get_character_registry_record_by_name(target_name)
+        if existing is not None:
+            mark_character_registry_used(existing["id"])
+            return existing
+
+    record = upsert_character_registry_record(
+        name=target_name,
+        image_url=str(image_url).strip(),
+        source_url=source_url,
+        source_label=source,
+        audit_score=float(audit_state.get("score", 0) or 0),
+        audit_status=str(audit_state.get("status", "verified") or "verified"),
+        audit_log=audit_state if isinstance(audit_state, dict) else {},
+    )
+    return record
+
+
+def backfill_registry_from_current_character_state() -> Optional[Dict[str, Any]]:
+    state = get_character_state()
+    image_url = str(state.get("image_url") or "").strip()
+    if not image_url or is_simulated_url(image_url):
+        return None
+    target_name = infer_story_target_character_name()
+    if not target_name:
+        return None
+    existing = get_character_registry_record_by_name(target_name)
+    if existing is not None:
+        return existing
+    return save_character_to_registry_from_state(image_url=image_url, source="backfill_existing_state")
+
+
+def ensure_story_character_name_persisted() -> str:
+    config = load_payload_config()
+    character = config.get("character", {}) if isinstance(config.get("character"), dict) else {}
+    current_name = str(character.get("name", "")).strip()
+    if current_name:
+        return current_name
+    inferred = infer_story_target_character_name()
+    if not inferred:
+        return ""
+    character["name"] = inferred
+    config["character"] = character
+    save_payload_config(config)
+    style_description = get_style_description_from_config(config)
+    enforce_scene_prompts_with_character_name(inferred, style_description, persist_payload=True)
+    return inferred
+
+
 def normalize_status(payload: Dict[str, Any]) -> str:
     candidates = [
         payload.get("status"),
@@ -1234,12 +2149,24 @@ def resolve_reference_images(refs: List[str], dry_run: bool, client: Optional[Wa
 
 
 def get_character_state() -> Dict[str, Any]:
+    task_id = get_meta("character_task_id", None)
+    task_text = str(task_id or "").strip()
+    source = "generated"
+    registry_id = ""
+    if task_text.startswith("registry-"):
+        source = "registry_reuse"
+        registry_id = task_text.replace("registry-", "", 1)
+    elif not task_text:
+        source = "pending"
     return {
         "status": get_meta("character_status", "pending"),
-        "task_id": get_meta("character_task_id", None),
+        "task_id": task_id,
         "image_url": get_meta("character_image_url", None),
         "last_error": get_meta("character_last_error", None),
         "updated_at": get_meta("character_updated_at", None),
+        "source": source,
+        "registry_id": registry_id or None,
+        "audit": get_character_audit_state(),
     }
 
 
@@ -1274,6 +2201,7 @@ def refresh_character_state_from_provider() -> None:
             urls = collect_urls(payload.get("output", payload))
             image_url = choose_primary_url(urls, kind="image")
             update_character_state(status="completed", task_id=task_id, image_url=image_url, last_error=None)
+            save_character_to_registry_from_state(image_url=image_url, source="generated")
         elif status in FAIL_STATUSES:
             update_character_state(
                 status="failed",
@@ -1377,6 +2305,7 @@ def get_style_reference_urls(dry_run: bool, client: Optional[WaveSpeedClient]) -
 def preflight_character_for_scene_images(*, dry_run: bool) -> None:
     if dry_run:
         return
+    auto_bind_character_from_registry(force=False)
     refresh_character_state_from_provider()
     state = get_character_state()
     image_url = str(state.get("image_url") or "").strip()
@@ -1404,13 +2333,63 @@ def preflight_character_for_scene_images(*, dry_run: bool) -> None:
 
 
 def generate_character_model(dry_run: bool, submit_only: bool = False) -> Dict[str, str]:
+    ensured_name = ensure_story_character_name_persisted()
     config = load_payload_config()
     generation = get_generation_config()
     character = config.get("character", {}) if isinstance(config.get("character"), dict) else {}
-    name = str(character.get("name", "")).strip()
+    name = str(character.get("name", "")).strip() or ensured_name
     model_prompt = str(character.get("character_model_prompt", "")).strip()
     consistency_notes = str(character.get("consistency_notes", "")).strip()
     style_description = get_style_description_from_config(config)
+
+    # If this story already has a saved character model, reuse it instantly.
+    reuse = auto_bind_character_from_registry(force=False)
+    if reuse.get("bound"):
+        record = reuse.get("registry_record", {}) if isinstance(reuse.get("registry_record"), dict) else {}
+        return {
+            "task_id": f"registry-{record.get('id', '')}",
+            "image_url": str(record.get("image_url", "")),
+        }
+
+    identity_cfg = get_character_identity_config(config)
+    audit_enabled = bool(identity_cfg.get("audit_enabled", True))
+    min_score = float(identity_cfg.get("min_confidence_score", 0.6) or 0.6)
+    audit_sources = identity_cfg.get("sources", [])
+
+    discovered_refs: List[str] = []
+    if audit_enabled and name:
+        try:
+            audit = run_character_identity_audit(name, min_score=min_score, sources=audit_sources)
+            selected = audit.get("selected_reference_images", [])
+            if not isinstance(selected, list) or not selected:
+                selected = audit.get("review_reference_images", [])
+            if isinstance(selected, list):
+                discovered_refs = [str(item).strip() for item in selected if str(item).strip()]
+        except Exception as exc:  # noqa: BLE001
+            set_character_audit_state(
+                {
+                    "target_name": name,
+                    "status": "failed",
+                    "score": 0,
+                    "selected_reference_images": [],
+                    "selected_source_urls": [],
+                    "candidates": [],
+                    "requested_at": utc_now(),
+                    "story_id": str(config.get("story_id", "")).strip(),
+                    "error": str(exc),
+                }
+            )
+
+    style_ref_list = config.get("style_reference_images", [])
+    style_ref_list = style_ref_list if isinstance(style_ref_list, list) else []
+    merged_ref_list: List[str] = []
+    for ref in discovered_refs + [str(item).strip() for item in style_ref_list if str(item).strip()]:
+        if ref and ref not in merged_ref_list:
+            merged_ref_list.append(ref)
+    if merged_ref_list != style_ref_list:
+        config["style_reference_images"] = merged_ref_list
+        save_payload_config(config)
+
     prompt = build_character_prompt(
         name=name,
         model_prompt=model_prompt,
@@ -1448,6 +2427,7 @@ def generate_character_model(dry_run: bool, submit_only: bool = False) -> Dict[s
         urls = collect_urls(result.get("output", result))
         image_url = choose_primary_url(urls, kind="image")
         update_character_state(status="completed", task_id=task_id, image_url=image_url, last_error=None)
+        save_character_to_registry_from_state(image_url=image_url, source="generated")
         return {"task_id": task_id, "image_url": image_url}
     except Exception as exc:  # noqa: BLE001
         update_character_state(status="failed", task_id=None, image_url=None, last_error=str(exc))
@@ -1799,6 +2779,12 @@ def api_overview() -> Any:
     bootstrap_once()
     reconcile_trigger_jobs()
     reconcile_provider_jobs()
+    backfill_registry_from_current_character_state()
+    try:
+        auto_bind_character_from_registry(force=False)
+    except Exception:
+        pass
+    registry_items = list_character_registry(limit=8)
     return jsonify(
         {
             "triggers": {
@@ -1819,6 +2805,8 @@ def api_overview() -> Any:
             },
             "script_panel": read_script_panel(),
             "character": get_character_state(),
+            "character_audit_state": get_character_audit_state(),
+            "character_registry": {"count": count_character_registry(), "items": registry_items},
             "runtime": {
                 "serverless": is_serverless_runtime(),
                 "wavespeed_configured": bool(os.getenv("WAVESPEED_API_KEY", "").strip()),
@@ -1983,6 +2971,11 @@ def api_scene_jobs() -> Any:
 def api_character() -> Any:
     bootstrap_once()
     reconcile_provider_jobs()
+    backfill_registry_from_current_character_state()
+    try:
+        auto_bind_character_from_registry(force=False)
+    except Exception:
+        pass
     return jsonify(get_character_state())
 
 
@@ -2016,6 +3009,55 @@ def api_character_generate() -> Any:
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 400
     return jsonify(result), 200
+
+
+@app.get("/api/character/audit")
+def api_character_audit_get() -> Any:
+    bootstrap_once()
+    identity_cfg = get_character_identity_config()
+    return jsonify(
+        {
+            "audit": get_character_audit_state(),
+            "target_name": infer_story_target_character_name(),
+            "registry_count": count_character_registry(),
+            "character_identity": identity_cfg,
+        }
+    )
+
+
+@app.post("/api/character/audit")
+def api_character_audit_post() -> Any:
+    bootstrap_once()
+    payload = request.get_json(silent=True) or {}
+    target_name = str(payload.get("target_name", "")).strip() or infer_story_target_character_name()
+    if not target_name:
+        return jsonify({"error": "No character name found in current story/script."}), 400
+    try:
+        score = float(payload.get("min_confidence_score", 0.6) or 0.6)
+        sources = payload.get("sources")
+        sources_list = sources if isinstance(sources, list) else None
+        result = run_character_identity_audit(target_name, min_score=score, sources=sources_list)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(result)
+
+
+@app.get("/api/character/registry")
+def api_character_registry_get() -> Any:
+    bootstrap_once()
+    return jsonify({"count": count_character_registry(), "items": list_character_registry(limit=120)})
+
+
+@app.post("/api/character/auto-bind")
+def api_character_auto_bind() -> Any:
+    bootstrap_once()
+    payload = request.get_json(silent=True) or {}
+    force = bool(payload.get("force", False))
+    try:
+        result = auto_bind_character_from_registry(force=force)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(result)
 
 
 @app.get("/api/script")

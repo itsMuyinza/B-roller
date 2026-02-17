@@ -18,7 +18,8 @@
   "character": {
     "name": "string",
     "character_model_prompt": "string",
-    "consistency_notes": "string"
+    "consistency_notes": "string",
+    "auto_discover_from_story": true
   },
   "generation": {
     "image_model": "google/nano-banana-pro/edit",
@@ -45,6 +46,12 @@
   "output": {
     "cloud_target": "supabase|cloudinary",
     "supabase_table": "aprt_story_payloads"
+  },
+  "character_identity": {
+    "audit_enabled": true,
+    "auto_reuse_saved_model": true,
+    "sources": ["duckduckgo_web", "wikipedia", "wikimedia_commons"],
+    "min_confidence_score": 0.6
   }
 }
 ```
@@ -62,7 +69,27 @@
   "character_model": {
     "task_id": "string",
     "status": "succeeded|failed",
-    "image_url": "https://..."
+    "image_url": "https://...",
+    "source": "generated|registry_reuse",
+    "registry_id": "string|null",
+    "identity_audit": {
+      "target_name": "string",
+      "status": "verified|needs_review|reused|failed",
+      "score": 0.0,
+      "selected_reference_images": ["https://..."],
+      "selected_source_urls": ["https://..."],
+      "review_reference_images": ["https://..."],
+      "review_source_urls": ["https://..."],
+      "candidates": [
+        {
+          "title": "string",
+          "image_url": "https://...",
+          "source_url": "https://...",
+          "score": 0.0,
+          "matched_tokens": 0
+        }
+      ]
+    }
   },
   "scenes": [
     {
@@ -125,6 +152,29 @@
   "script_panel": {
     "script_path": "tools/config/script_3_voiceover.md",
     "script_text": "full scrollable script content"
+  },
+  "character_registry": {
+    "count": 0,
+    "items": [
+      {
+        "id": "string",
+        "name": "string",
+        "aliases": ["string"],
+        "name_key": "string",
+        "image_url": "https://...",
+        "source_url": "https://...",
+        "audit_score": 0.0,
+        "last_used_at": "ISO-8601 UTC",
+        "updated_at": "ISO-8601 UTC"
+      }
+    ]
+  },
+  "character_audit_state": {
+    "target_name": "string",
+    "status": "verified|needs_review|reused|failed|pending",
+    "score": 0.0,
+    "selected_reference_images": ["https://..."],
+    "selected_source_urls": ["https://..."]
   }
 }
 ```
@@ -146,6 +196,30 @@
   "video_url": "string|null",
   "last_error": "string|null",
   "updated_at": "ISO-8601 UTC"
+}
+```
+
+### Character Registry Record
+```json
+{
+  "id": "string",
+  "name": "string",
+  "name_key": "string",
+  "aliases": ["string"],
+  "image_url": "https://...",
+  "source_url": "https://...",
+  "source_label": "string",
+  "audit_score": 0.0,
+  "audit_status": "verified|needs_review|failed",
+  "audit_log": {
+    "target_name": "string",
+    "status": "string",
+    "score": 0.0,
+    "candidates": []
+  },
+  "created_at": "ISO-8601 UTC",
+  "updated_at": "ISO-8601 UTC",
+  "last_used_at": "ISO-8601 UTC"
 }
 ```
 
@@ -186,6 +260,13 @@
     - Inline prompt editing per scene.
     - Per-scene `Generate Image` and `Generate Video` actions.
     - Batch generation actions (`Generate Missing Images`, `Generate Missing Videos`).
+  - Added character identity audit + registry reuse pipeline:
+    - Multi-source audit (`duckduckgo_web`, `wikipedia`, `wikimedia_commons`) with confidence scoring.
+    - Scrapes source pages for candidate images and verifies with token-match confidence scoring.
+    - Persists audited/saved character models in `character_registry`.
+    - Auto-binds existing character model when a matching person name appears in the story/script.
+    - Added dashboard controls: `Audit Story Character`, `Auto-Load Saved Character`, registry panel, and audited candidate previews.
+  - Added character registry backfill from existing completed character state so older runs become reusable automatically.
     - Character-model-first generation control.
     - Scrollable script editor panel with save support.
     - Scene jobs queue + full trigger jobs queue with log tail.

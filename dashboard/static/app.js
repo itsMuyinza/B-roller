@@ -23,7 +23,11 @@ const styleDescriptionInput = document.getElementById("styleDescriptionInput");
 const useStyleRefsCheckbox = document.getElementById("useStyleRefsCheckbox");
 const saveCharacterConfigBtn = document.getElementById("saveCharacterConfigBtn");
 const regenPromptsBtn = document.getElementById("regenPromptsBtn");
+const auditCharacterBtn = document.getElementById("auditCharacterBtn");
+const autoBindCharacterBtn = document.getElementById("autoBindCharacterBtn");
 const characterPromptPreview = document.getElementById("characterPromptPreview");
+const characterAuditBox = document.getElementById("characterAuditBox");
+const characterRegistryBox = document.getElementById("characterRegistryBox");
 const triggerInfo = document.getElementById("triggerInfo");
 
 const scriptPath = document.getElementById("scriptPath");
@@ -68,7 +72,13 @@ function esc(value) {
 }
 
 function statusChip(status) {
-  const normalized = (status || "unknown").toLowerCase();
+  const normalizedRaw = (status || "unknown").toLowerCase();
+  const normalized =
+    normalizedRaw === "verified" || normalizedRaw === "reused"
+      ? "completed"
+      : normalizedRaw === "needs_review"
+        ? "pending"
+        : normalizedRaw;
   const safe = ["completed", "success", "running", "failed", "pending"].includes(normalized)
     ? normalized
     : "unknown";
@@ -255,6 +265,11 @@ function renderCharacter(character) {
   const simulated = isSimulatedUrl(imageUrl);
   const taskId = character?.task_id || "-";
   const lastError = character?.last_error || "";
+  const source = character?.source || "pending";
+  const registryId = character?.registry_id || "";
+  const audit = character?.audit || {};
+  const auditStatus = audit?.status || "pending";
+  const auditScore = Number(audit?.score);
 
   characterBox.innerHTML = `
     <div class="kv">
@@ -265,16 +280,211 @@ function renderCharacter(character) {
       <div class="k">Task ID</div>
       <div class="v">${esc(taskId)}</div>
     </div>
+    <div class="kv">
+      <div class="k">Source</div>
+      <div class="v">${esc(source)}${registryId ? ` (${esc(registryId)})` : ""}</div>
+    </div>
+    <div class="kv">
+      <div class="k">Identity Audit</div>
+      <div class="v">${statusChip(auditStatus)}${Number.isFinite(auditScore) ? ` <span class="audit-score-inline">${esc(auditScore.toFixed(2))}</span>` : ""}</div>
+    </div>
     ${
       imageUrl
         ? simulated
           ? `<div class="preview-placeholder">Simulated character preview (dry run)</div>`
-          : `<img class="character-preview" src="${esc(imageUrl)}" alt="Character model" />`
+          : `
+            <div class="media-pop-trigger character-media-trigger" role="button" tabindex="0" data-media-type="image" data-media-url="${esc(imageUrl)}" data-media-label="Character Model">
+              <img class="character-preview" src="${esc(imageUrl)}" alt="Character model" />
+              <span class="media-pop-hint">Open</span>
+            </div>
+          `
         : `<div class="preview-placeholder">No character model image yet</div>`
     }
     ${lastError ? `<div class="kv"><div class="k">Last Error</div><div class="v">${esc(lastError)}</div></div>` : ""}
   `;
   attachMediaFallbacks(characterBox);
+  attachMediaPopupTriggers(characterBox);
+}
+
+function formatAuditScore(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toFixed(2) : "-";
+}
+
+function prettyAutoBindReason(reason) {
+  const map = {
+    no_story_character_detected: "No character name detected in current story/script.",
+    no_registry_match: "No saved model in registry for current character.",
+    character_image_already_set: "Character image already loaded for this story.",
+    character_generation_running: "Character generation is currently running.",
+    auto_reuse_disabled: "Auto-reuse is disabled in character identity settings.",
+  };
+  return map[reason] || reason || "No saved character model was applied.";
+}
+
+function renderCharacterAudit(auditPayload, options = {}) {
+  if (!characterAuditBox) return;
+  const audit = auditPayload && typeof auditPayload === "object" ? auditPayload : {};
+  const targetName = options.targetName || audit.target_name || "Not detected";
+  const status = audit.status || "pending";
+  const score = formatAuditScore(audit.score);
+  const requestedAt = audit.requested_at || "";
+  const sourceErrors = Array.isArray(audit.source_errors) ? audit.source_errors : [];
+  const sourcesUsed = Array.isArray(audit.sources_used) ? audit.sources_used : [];
+  const selected = Array.isArray(audit.selected_reference_images) ? audit.selected_reference_images : [];
+  const review = Array.isArray(audit.review_reference_images) ? audit.review_reference_images : [];
+  const chosenImage = selected[0] || review[0] || "";
+  const candidates = Array.isArray(audit.candidates) ? audit.candidates.slice(0, 6) : [];
+
+  characterAuditBox.innerHTML = `
+    <div class="meta-item">
+      <div class="meta-key">Character Audit</div>
+      <div class="meta-value">
+        <div>${statusChip(status)} <span class="audit-score-inline">Score ${esc(score)}</span></div>
+        <div class="audit-subrow">Target: ${esc(targetName)}</div>
+        ${requestedAt ? `<div class="audit-subrow">Updated: ${esc(requestedAt)}</div>` : ""}
+        ${sourcesUsed.length ? `<div class="audit-subrow">Sources: ${esc(sourcesUsed.join(", "))}</div>` : ""}
+      </div>
+    </div>
+    ${
+      chosenImage
+        ? `
+          <div class="audit-preview">
+            <div class="audit-preview-label">${selected.length ? "Verified Match" : "Review Candidate"}</div>
+            <div class="media-pop-trigger" role="button" tabindex="0" data-media-type="image" data-media-url="${esc(chosenImage)}" data-media-label="Audit Candidate">
+              <img class="preview" src="${esc(chosenImage)}" alt="Audit candidate image" loading="lazy" />
+              <span class="media-pop-hint">Open</span>
+            </div>
+          </div>
+        `
+        : `<div class="preview-placeholder">No audited reference image selected yet</div>`
+    }
+    ${
+      candidates.length
+        ? `
+          <div class="audit-candidates-list">
+            ${candidates
+              .map((candidate, idx) => {
+                const imageUrl = candidate.image_url || "";
+                return `
+                  <div class="audit-candidate">
+                    <div class="audit-candidate-head">
+                      <span>#${idx + 1}</span>
+                      <span>${esc(candidate.source || "source")}</span>
+                      <span>${esc(formatAuditScore(candidate.score))}</span>
+                    </div>
+                    <div class="audit-candidate-title">${esc(candidate.title || "")}</div>
+                    ${candidate.summary ? `<div class="audit-candidate-summary">${esc(candidate.summary)}</div>` : ""}
+                    ${
+                      imageUrl
+                        ? `
+                          <div class="media-pop-trigger audit-candidate-thumb" role="button" tabindex="0" data-media-type="image" data-media-url="${esc(imageUrl)}" data-media-label="Audit Candidate ${idx + 1}">
+                            <img class="preview" src="${esc(imageUrl)}" alt="Audit candidate ${idx + 1}" loading="lazy" />
+                            <span class="media-pop-hint">Open</span>
+                          </div>
+                        `
+                        : ""
+                    }
+                    ${
+                      candidate.source_url
+                        ? `<a class="audit-link" href="${esc(candidate.source_url)}" target="_blank" rel="noreferrer noopener">Open source</a>`
+                        : ""
+                    }
+                  </div>
+                `;
+              })
+              .join("")}
+          </div>
+        `
+        : ""
+    }
+    ${
+      sourceErrors.length
+        ? `
+          <div class="audit-errors">
+            ${sourceErrors.map((item) => `<div class="audit-error-line">${esc(item)}</div>`).join("")}
+          </div>
+        `
+        : ""
+    }
+  `;
+  attachMediaFallbacks(characterAuditBox);
+  attachMediaPopupTriggers(characterAuditBox);
+}
+
+function renderCharacterRegistry(registryPayload) {
+  if (!characterRegistryBox) return;
+  const payload = registryPayload && typeof registryPayload === "object" ? registryPayload : {};
+  const count = Number(payload.count) || 0;
+  const items = Array.isArray(payload.items) ? payload.items.slice(0, 8) : [];
+
+  characterRegistryBox.innerHTML = `
+    <div class="meta-item">
+      <div class="meta-key">Character Registry</div>
+      <div class="meta-value">${esc(String(count))} saved model${count === 1 ? "" : "s"}</div>
+    </div>
+    ${
+      items.length
+        ? `
+          <div class="registry-list">
+            ${items
+              .map((item) => {
+                const imageUrl = item.image_url || "";
+                const name = item.name || "Unnamed";
+                return `
+                  <div class="registry-item">
+                    <div class="registry-title">${esc(name)}</div>
+                    <div class="registry-sub">Score ${esc(formatAuditScore(item.audit_score))} • ${esc(item.audit_status || "unknown")}</div>
+                    ${item.last_used_at ? `<div class="registry-sub">Used: ${esc(item.last_used_at)}</div>` : ""}
+                    ${
+                      imageUrl
+                        ? `
+                          <div class="media-pop-trigger registry-thumb" role="button" tabindex="0" data-media-type="image" data-media-url="${esc(imageUrl)}" data-media-label="${esc(name)}">
+                            <img class="preview" src="${esc(imageUrl)}" alt="${esc(name)}" loading="lazy" />
+                            <span class="media-pop-hint">Open</span>
+                          </div>
+                        `
+                        : `<div class="preview-placeholder">No image</div>`
+                    }
+                    <button class="btn btn-sm btn-muted registry-use-btn" data-registry-name="${esc(name)}">Use This Model</button>
+                  </div>
+                `;
+              })
+              .join("")}
+          </div>
+        `
+        : `<div class="preview-placeholder">No saved character models yet</div>`
+    }
+  `;
+
+  characterRegistryBox.querySelectorAll(".registry-use-btn").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const name = button.getAttribute("data-registry-name") || "";
+      try {
+        await requestJson("/api/character/config", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name }),
+        });
+        const bound = await requestJson("/api/character/auto-bind", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ force: true }),
+        });
+        if (bound?.bound) {
+          showToast(`Loaded saved model for ${name}`);
+        } else {
+          showToast(prettyAutoBindReason(bound?.reason), true);
+        }
+        await Promise.all([refreshCharacter(), refreshCharacterConfig(), refreshCharacterAudit(), refreshCharacterRegistry()]);
+      } catch (err) {
+        showToast(`Could not apply saved model: ${err.message}`, true);
+      }
+    });
+  });
+
+  attachMediaFallbacks(characterRegistryBox);
+  attachMediaPopupTriggers(characterRegistryBox);
 }
 
 function renderCharacterConfig(config) {
@@ -295,6 +505,9 @@ function renderCharacterConfig(config) {
     styleDescriptionInput.value = config.style_description || "";
   }
   useStyleRefsCheckbox.checked = Boolean(config.use_style_reference_images);
+  const identity = config.character_identity || {};
+  const sources = Array.isArray(identity.sources) ? identity.sources : [];
+  const registryMatch = config.registry_match || null;
   characterPromptPreview.innerHTML = `
     <div class="meta-item">
       <div class="meta-key">Style Guardrail</div>
@@ -303,6 +516,21 @@ function renderCharacterConfig(config) {
     <div class="meta-item">
       <div class="meta-key">Effective Character Prompt</div>
       <div class="meta-value">${esc(config.effective_prompt || "")}</div>
+    </div>
+    <div class="meta-item">
+      <div class="meta-key">Story Character Detection</div>
+      <div class="meta-value">
+        <div>Configured: ${esc(config.name || "None")}</div>
+        <div>Inferred: ${esc(config.inferred_target_name || "None")}</div>
+        <div>Audit: ${identity.audit_enabled ? "enabled" : "disabled"} • Min score ${esc(formatAuditScore(identity.min_confidence_score))}</div>
+        <div>Sources: ${esc(sources.join(", ") || "none")}</div>
+        <div>Auto-reuse saved model: ${identity.auto_reuse_saved_model ? "on" : "off"}</div>
+        ${
+          registryMatch
+            ? `<div class="registry-match-line">Registry match available: ${esc(registryMatch.name || "")} (${esc(formatAuditScore(registryMatch.audit_score))})</div>`
+            : ""
+        }
+      </div>
     </div>
   `;
 }
@@ -621,6 +849,10 @@ async function refreshOverview() {
   const data = await requestJson("/api/overview");
   renderTriggerInfo(data);
   renderCharacter(data.character || {});
+  renderCharacterAudit(data.character_audit_state || data.character?.audit || {}, {
+    targetName: data.character_audit_state?.target_name || data.character?.audit?.target_name || "",
+  });
+  renderCharacterRegistry(data.character_registry || {});
   const runtime = data.runtime || {};
   const wavespeedConfigured = Boolean(runtime.wavespeed_configured);
   const liveOption = modeSelect.querySelector('option[value="live"]');
@@ -678,6 +910,17 @@ async function refreshTriggerJobs() {
 async function refreshCharacter() {
   const data = await requestJson("/api/character");
   renderCharacter(data);
+  renderCharacterAudit(data.audit || {}, { targetName: data.audit?.target_name || "" });
+}
+
+async function refreshCharacterAudit() {
+  const data = await requestJson("/api/character/audit");
+  renderCharacterAudit(data.audit || {}, { targetName: data.target_name || data.audit?.target_name || "" });
+}
+
+async function refreshCharacterRegistry() {
+  const data = await requestJson("/api/character/registry");
+  renderCharacterRegistry(data);
 }
 
 async function refreshAll() {
@@ -689,6 +932,8 @@ async function refreshAll() {
       refreshSceneJobs(),
       refreshRuns(),
       refreshTriggerJobs(),
+      refreshCharacterAudit(),
+      refreshCharacterRegistry(),
     ]);
     if (selectedTriggerJobId) {
       await loadTriggerLog(selectedTriggerJobId);
@@ -705,13 +950,17 @@ refreshBtn.addEventListener("click", async () => {
 
 genCharacterBtn.addEventListener("click", async () => {
   try {
-    await requestJson("/api/character/generate", {
+    const result = await requestJson("/api/character/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dry_run: isDryRun() }),
     });
-    showToast(`Character generation started${isDryRun() ? " (dry simulation)" : " (live WaveSpeed)"}`);
-    await Promise.all([refreshCharacter(), refreshSceneJobs()]);
+    if (String(result?.task_id || "").startsWith("registry-")) {
+      showToast("Loaded saved character model from registry");
+    } else {
+      showToast(`Character generation started${isDryRun() ? " (dry simulation)" : " (live WaveSpeed)"}`);
+    }
+    await Promise.all([refreshCharacter(), refreshSceneJobs(), refreshCharacterAudit(), refreshCharacterRegistry()]);
   } catch (err) {
     showToast(`Character trigger failed: ${err.message}`, true);
   }
@@ -739,7 +988,7 @@ saveCharacterConfigBtn.addEventListener("click", async () => {
     showToast(
       `Character settings saved. Prompt updates: ${normalized.payload_updates || 0}/${normalized.db_updates || 0}`
     );
-    await Promise.all([refreshCharacterConfig(), refreshScenes()]);
+    await Promise.all([refreshCharacterConfig(), refreshScenes(), refreshCharacterAudit(), refreshCharacterRegistry()]);
   } catch (err) {
     showToast(`Character settings save failed: ${err.message}`, true);
   }
@@ -763,9 +1012,53 @@ regenPromptsBtn.addEventListener("click", async () => {
     });
     const normalized = data.normalized_prompts || {};
     showToast(`Scene prompts normalized for ${characterNameInput.value || "character"} (${normalized.db_updates || 0})`);
-    await Promise.all([refreshCharacterConfig(), refreshScenes()]);
+    await Promise.all([refreshCharacterConfig(), refreshScenes(), refreshCharacterAudit(), refreshCharacterRegistry()]);
   } catch (err) {
     showToast(`Normalize prompts failed: ${err.message}`, true);
+  }
+});
+
+auditCharacterBtn?.addEventListener("click", async () => {
+  try {
+    const cfg = await requestJson("/api/character/config");
+    const identity = cfg.character_identity || {};
+    const minScore = Number(identity.min_confidence_score);
+    const sources = Array.isArray(identity.sources) ? identity.sources : undefined;
+    const targetName = (characterNameInput.value || cfg.inferred_target_name || cfg.name || "").trim();
+    const data = await requestJson("/api/character/audit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        target_name: targetName,
+        min_confidence_score: Number.isFinite(minScore) ? minScore : 0.6,
+        sources,
+      }),
+    });
+    renderCharacterAudit(data || {}, { targetName: targetName || data.target_name || "" });
+    const label = data.status === "verified" ? "verified" : data.status || "done";
+    showToast(`Character audit ${label}. Score ${formatAuditScore(data.score)}`);
+    await refreshCharacterRegistry();
+  } catch (err) {
+    showToast(`Character audit failed: ${err.message}`, true);
+  }
+});
+
+autoBindCharacterBtn?.addEventListener("click", async () => {
+  try {
+    const result = await requestJson("/api/character/auto-bind", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force: true }),
+    });
+    if (result?.bound) {
+      const record = result.registry_record || {};
+      showToast(`Loaded saved model: ${record.name || result.target_name || "character"}`);
+    } else {
+      showToast(prettyAutoBindReason(result?.reason), true);
+    }
+    await Promise.all([refreshCharacter(), refreshCharacterConfig(), refreshCharacterAudit(), refreshCharacterRegistry()]);
+  } catch (err) {
+    showToast(`Auto-load failed: ${err.message}`, true);
   }
 });
 
@@ -866,6 +1159,8 @@ setInterval(async () => {
     await refreshRuns();
     await refreshCharacter();
     await refreshCharacterConfig();
+    await refreshCharacterAudit();
+    await refreshCharacterRegistry();
   } catch (err) {
     console.error(err);
   } finally {

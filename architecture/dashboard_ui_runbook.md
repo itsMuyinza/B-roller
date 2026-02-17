@@ -17,6 +17,8 @@ python3 dashboard/app.py
 1. Generate character model:
    - Click `Generate Character Model`.
    - Use `Character Consistency` panel to set character name, style references, and prompt lock before generation.
+   - Before generation (or manually), run `Audit Story Character` to search/scrape references and verify candidate identity matches.
+   - If a saved model already exists for that person, use `Auto-Load Saved Character` (or `Use This Model` in registry list).
 2. Edit prompts:
    - Update scene row prompts directly in the grid.
    - Click `Save Prompt` on that row.
@@ -38,10 +40,24 @@ python3 dashboard/app.py
 - Scene records: `dashboard` SQLite table `scenes` in `.tmp/dashboard/dashboard.db`
 - Scene jobs: `scene_jobs` table in `.tmp/dashboard/dashboard.db`
 - Trigger jobs: `trigger_jobs` table in `.tmp/dashboard/dashboard.db`
+- Character registry: `character_registry` table in `.tmp/dashboard/dashboard.db`
+- Character audit log: `character_audit_events` table in `.tmp/dashboard/dashboard.db`
 - Payload outputs: `.tmp/phase5_story3/payload_*.json`
 - Full trigger logs: `.tmp/logs/dashboard_trigger_*.log`
 - Script source: `tools/config/script_3_voiceover.md`
 - Character/prompt override source (serverless fallback): `.tmp/dashboard/payload_config_override.json`
+
+## Character Audit and Reuse API
+- `GET /api/character/audit`
+- `POST /api/character/audit`
+- `GET /api/character/registry`
+- `POST /api/character/auto-bind`
+
+Audit behavior:
+- Searches/scrapes candidate identity sources (`duckduckgo_web`, `wikipedia`, `wikimedia_commons`).
+- Scores each candidate against detected story character name.
+- Saves selected/review candidates into dashboard audit state and history.
+- Auto-reuse binds a matching registry model immediately when available.
 
 ## Failure / Repair Loop
 1. Analyze:
