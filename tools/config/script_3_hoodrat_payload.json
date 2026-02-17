@@ -79,5 +79,15 @@
     "cloud_target": "supabase",
     "supabase_table": "aprt_story_payloads"
   },
-  "style_description": "anime-inspired cel-shaded style, cinematic framing, expressive linework, clean gradients, bold silhouettes, and high-contrast lighting"
+  "style_description": "anime-inspired cel-shaded style, cinematic framing, expressive linework, clean gradients, bold silhouettes, and high-contrast lighting",
+  "character_identity": {
+    "audit_enabled": true,
+    "auto_reuse_saved_model": true,
+    "min_confidence_score": 0.6,
+    "sources": [
+      "duckduckgo_web",
+      "wikipedia",
+      "wikimedia_commons"
+    ]
+  }
 }
