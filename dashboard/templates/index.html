@@ -202,6 +202,20 @@
       </section>
     </main>
 
+    <div id="mediaModal" class="media-modal" aria-hidden="true">
+      <div class="media-modal-backdrop" data-media-close="true"></div>
+      <div class="media-modal-dialog" role="dialog" aria-modal="true" aria-label="Media Preview">
+        <div class="media-modal-head">
+          <div id="mediaModalTitle" class="media-modal-title">Preview</div>
+          <button id="mediaModalClose" class="btn btn-glass btn-sm" type="button">Close</button>
+        </div>
+        <div class="media-modal-body">
+          <img id="mediaModalImage" class="media-modal-image" alt="Preview image" />
+          <video id="mediaModalVideo" class="media-modal-video" controls preload="metadata"></video>
+        </div>
+      </div>
+    </div>
+
     <div id="toast" class="toast"></div>
     <script src="/static/app.js"></script>
   </body>

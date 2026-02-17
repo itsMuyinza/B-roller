@@ -32,6 +32,11 @@ const saveScriptBtn = document.getElementById("saveScriptBtn");
 
 const triggerLog = document.getElementById("triggerLog");
 const toast = document.getElementById("toast");
+const mediaModal = document.getElementById("mediaModal");
+const mediaModalClose = document.getElementById("mediaModalClose");
+const mediaModalImage = document.getElementById("mediaModalImage");
+const mediaModalVideo = document.getElementById("mediaModalVideo");
+const mediaModalTitle = document.getElementById("mediaModalTitle");
 
 let selectedTriggerJobId = null;
 let pollInFlight = false;
@@ -68,6 +73,79 @@ function statusChip(status) {
     ? normalized
     : "unknown";
   return `<span class="status-chip status-${safe}">${esc(status || "unknown")}</span>`;
+}
+
+function closeMediaModal() {
+  if (!mediaModal) return;
+  mediaModal.classList.remove("open");
+  mediaModal.setAttribute("aria-hidden", "true");
+  mediaModal.dataset.mediaType = "";
+
+  if (mediaModalImage) {
+    mediaModalImage.removeAttribute("src");
+    mediaModalImage.style.display = "none";
+  }
+  if (mediaModalVideo) {
+    mediaModalVideo.pause();
+    mediaModalVideo.removeAttribute("src");
+    mediaModalVideo.load();
+    mediaModalVideo.style.display = "none";
+  }
+}
+
+function openMediaModal(url, type, label) {
+  if (!mediaModal || !url) return;
+  const mediaType = type === "video" ? "video" : "image";
+  mediaModal.classList.add("open");
+  mediaModal.setAttribute("aria-hidden", "false");
+  mediaModal.dataset.mediaType = mediaType;
+
+  if (mediaModalTitle) {
+    mediaModalTitle.textContent = label || (mediaType === "video" ? "Video Preview" : "Image Preview");
+  }
+
+  if (mediaType === "image") {
+    if (mediaModalVideo) {
+      mediaModalVideo.pause();
+      mediaModalVideo.removeAttribute("src");
+      mediaModalVideo.load();
+      mediaModalVideo.style.display = "none";
+    }
+    if (mediaModalImage) {
+      mediaModalImage.src = url;
+      mediaModalImage.style.display = "block";
+    }
+    return;
+  }
+
+  if (mediaModalImage) {
+    mediaModalImage.removeAttribute("src");
+    mediaModalImage.style.display = "none";
+  }
+  if (mediaModalVideo) {
+    mediaModalVideo.src = url;
+    mediaModalVideo.style.display = "block";
+    mediaModalVideo.play().catch(() => {});
+  }
+}
+
+function attachMediaPopupTriggers(root) {
+  if (!root) return;
+  root.querySelectorAll(".media-pop-trigger").forEach((node) => {
+    if (node.dataset.popupBound === "1") return;
+    node.dataset.popupBound = "1";
+
+    const open = () => {
+      openMediaModal(node.dataset.mediaUrl || "", node.dataset.mediaType || "image", node.dataset.mediaLabel || "");
+    };
+    node.addEventListener("click", open);
+    node.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        open();
+      }
+    });
+  });
 }
 
 function attachMediaFallbacks(root) {
@@ -233,9 +311,19 @@ function scenePreview(url, type) {
   if (!url) return `<div class="preview-placeholder">No ${type}</div>`;
   if (isSimulatedUrl(url)) return `<div class="preview-placeholder">Simulated ${type} (dry run)</div>`;
   if (type === "image") {
-    return `<img class="preview" src="${esc(url)}" alt="Scene image" loading="lazy" />`;
+    return `
+      <div class="media-pop-trigger" role="button" tabindex="0" data-media-type="image" data-media-url="${esc(url)}" data-media-label="Scene Image">
+        <img class="preview" src="${esc(url)}" alt="Scene image" loading="lazy" />
+        <span class="media-pop-hint">Open</span>
+      </div>
+    `;
   }
-  return `<video class="preview" src="${esc(url)}" controls muted preload="none"></video>`;
+  return `
+    <div class="media-pop-trigger" role="button" tabindex="0" data-media-type="video" data-media-url="${esc(url)}" data-media-label="Scene Video">
+      <video class="preview" src="${esc(url)}" muted preload="metadata"></video>
+      <span class="media-pop-hint">Play</span>
+    </div>
+  `;
 }
 
 function sceneActionsMarkup(canDownloadImage, canDownloadVideo) {
@@ -421,8 +509,10 @@ function renderScenes(items) {
   const cardEntries = scenesCards ? Array.from(scenesCards.querySelectorAll("article[data-scene-id]")) : [];
   attachSceneEntryHandlers([...tableEntries, ...cardEntries]);
   attachMediaFallbacks(scenesBody);
+  attachMediaPopupTriggers(scenesBody);
   if (scenesCards) {
     attachMediaFallbacks(scenesCards);
+    attachMediaPopupTriggers(scenesCards);
   }
 }
 
@@ -748,6 +838,16 @@ saveScriptBtn.addEventListener("click", async () => {
     await refreshOverview();
   } catch (err) {
     showToast(`Script save failed: ${err.message}`, true);
+  }
+});
+
+mediaModalClose?.addEventListener("click", closeMediaModal);
+mediaModal?.querySelectorAll("[data-media-close='true']").forEach((node) => {
+  node.addEventListener("click", closeMediaModal);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && mediaModal?.classList.contains("open")) {
+    closeMediaModal();
   }
 });
 
