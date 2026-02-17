@@ -94,6 +94,41 @@
 }
 ```
 
+### Dashboard View Payload (UI Layer)
+```json
+{
+  "triggers": {
+    "github_workflow": {
+      "name": "phase5-story3-trigger",
+      "schedule_cron_utc": "0 15 * * *",
+      "workflow_path": ".github/workflows/phase5_story3_trigger.yml"
+    },
+    "local_webhook": {
+      "path": "/webhook",
+      "listener_script": "tools/webhook_listener.py"
+    },
+    "local_cron_script": "tools/install_local_cron.sh"
+  },
+  "runs": [
+    {
+      "run_id": "string",
+      "status": "running|completed|failed",
+      "scene_count": 8,
+      "started_at": "ISO-8601 UTC",
+      "ended_at": "ISO-8601 UTC",
+      "cloud_provider": "supabase|cloudinary",
+      "cloud_status": "success|failed|pending",
+      "cloud_destination": "string",
+      "payload_path": "absolute local path"
+    }
+  ],
+  "script_panel": {
+    "script_path": "tools/config/script_3_voiceover.md",
+    "script_text": "full scrollable script content"
+  }
+}
+```
+
 ## Execution Architecture
 - `tools/wavespeed_story_pipeline.py`
   - Character-first consistency generation.
@@ -123,6 +158,11 @@
   - Added repair loop SOP notes under `architecture/`.
   - Linked full Script 3 voiceover source file at `tools/config/script_3_voiceover.md`.
   - Added Pinterest reference URL resolver (`og:image` extraction) to improve style-reference reliability.
+  - Added local dashboard UI for Airtable-style trigger operations:
+    - Backend: `dashboard/app.py`
+    - Frontend: `dashboard/templates/index.html`, `dashboard/static/*`
+    - Runbook: `architecture/dashboard_ui_runbook.md`
+  - Dashboard includes scrollable full script panel and trigger launcher with dry/live mode.
   - Validation run (dry): `python3 tools/run_phase5_trigger.py --dry-run` succeeded, scene_count=8.
   - Validation run (live transfer): cloud upload succeeded to Cloudinary fallback.
   - Observed error: Supabase target table missing (`PGRST205`, table `public.aprt_story_payloads` not found).
