@@ -6,6 +6,7 @@ const genCharacterBtn = document.getElementById("genCharacterBtn");
 const genAllImagesBtn = document.getElementById("genAllImagesBtn");
 const genAllVideosBtn = document.getElementById("genAllVideosBtn");
 const runFullTriggerBtn = document.getElementById("runFullTriggerBtn");
+const downloadLatestPayloadBtn = document.getElementById("downloadLatestPayloadBtn");
 
 const scenesBody = document.getElementById("scenesBody");
 const sceneJobsBody = document.getElementById("sceneJobsBody");
@@ -36,6 +37,10 @@ function showToast(message, isError = false) {
   setTimeout(() => toast.classList.remove("show"), 2200);
 }
 
+function isSimulatedUrl(url) {
+  return typeof url === "string" && url.startsWith("https://dry-run.local/");
+}
+
 function esc(value) {
   if (value === null || value === undefined) return "";
   return String(value)
@@ -60,6 +65,29 @@ async function requestJson(url, options) {
     throw new Error(data.error || `HTTP ${response.status}`);
   }
   return data;
+}
+
+async function downloadFromApi(path, fallbackFilename) {
+  const response = await fetch(path);
+  const contentType = response.headers.get("content-type") || "";
+  if (!response.ok) {
+    if (contentType.includes("application/json")) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.error || `Download failed: HTTP ${response.status}`);
+    }
+    throw new Error(`Download failed: HTTP ${response.status}`);
+  }
+  const blob = await response.blob();
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  const header = response.headers.get("content-disposition") || "";
+  const match = header.match(/filename=\"?([^\";]+)\"?/i);
+  link.download = match?.[1] || fallbackFilename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.URL.revokeObjectURL(url);
 }
 
 function renderTriggerInfo(overview) {
@@ -98,6 +126,7 @@ function renderTriggerInfo(overview) {
 function renderCharacter(character) {
   const status = character?.status || "pending";
   const imageUrl = character?.image_url || "";
+  const simulated = isSimulatedUrl(imageUrl);
   const taskId = character?.task_id || "-";
   const lastError = character?.last_error || "";
 
@@ -112,7 +141,9 @@ function renderCharacter(character) {
     </div>
     ${
       imageUrl
-        ? `<img class="character-preview" src="${esc(imageUrl)}" alt="Character model" />`
+        ? simulated
+          ? `<div class="preview-placeholder">Simulated character preview (dry run)</div>`
+          : `<img class="character-preview" src="${esc(imageUrl)}" alt="Character model" />`
         : `<div class="preview-placeholder">No character model image yet</div>`
     }
     ${lastError ? `<div class="kv"><div class="k">Last Error</div><div class="v">${esc(lastError)}</div></div>` : ""}
@@ -121,6 +152,7 @@ function renderCharacter(character) {
 
 function scenePreview(url, type) {
   if (!url) return `<div class="preview-placeholder">No ${type}</div>`;
+  if (isSimulatedUrl(url)) return `<div class="preview-placeholder">Simulated ${type} (dry run)</div>`;
   if (type === "image") {
     return `<img class="preview" src="${esc(url)}" alt="Scene image" loading="lazy" />`;
   }
@@ -135,6 +167,8 @@ function renderScenes(items) {
 
   scenesBody.innerHTML = items
     .map((scene) => {
+      const canDownloadImage = Boolean(scene.image_url) && !isSimulatedUrl(scene.image_url);
+      const canDownloadVideo = Boolean(scene.video_url) && !isSimulatedUrl(scene.video_url);
       return `
       <tr data-scene-id="${esc(scene.scene_id)}">
         <td>${esc(scene.position)}</td>
@@ -165,6 +199,8 @@ function renderScenes(items) {
             <button class="btn btn-sm btn-muted" data-action="save">Save Prompt</button>
             <button class="btn btn-sm btn-primary" data-action="image">Generate Image</button>
             <button class="btn btn-sm btn-primary" data-action="video">Generate Video</button>
+            <button class="btn btn-sm btn-glass" data-action="download-image" ${canDownloadImage ? "" : "disabled"}>Download Image</button>
+            <button class="btn btn-sm btn-glass" data-action="download-video" ${canDownloadVideo ? "" : "disabled"}>Download Video</button>
           </div>
         </td>
       </tr>
@@ -223,6 +259,26 @@ function renderScenes(items) {
         showToast(`Video trigger failed (${sceneId}): ${err.message}`, true);
       }
     });
+
+    row.querySelector('[data-action="download-image"]').addEventListener("click", async () => {
+      if (row.querySelector('[data-action="download-image"]').hasAttribute("disabled")) return;
+      try {
+        await downloadFromApi(`/api/scenes/${encodeURIComponent(sceneId)}/download/image`, `${sceneId}_image`);
+        showToast(`Downloaded image for ${sceneId}`);
+      } catch (err) {
+        showToast(`Image download failed (${sceneId}): ${err.message}`, true);
+      }
+    });
+
+    row.querySelector('[data-action="download-video"]').addEventListener("click", async () => {
+      if (row.querySelector('[data-action="download-video"]').hasAttribute("disabled")) return;
+      try {
+        await downloadFromApi(`/api/scenes/${encodeURIComponent(sceneId)}/download/video`, `${sceneId}_video`);
+        showToast(`Downloaded video for ${sceneId}`);
+      } catch (err) {
+        showToast(`Video download failed (${sceneId}): ${err.message}`, true);
+      }
+    });
   });
 }
 
@@ -263,13 +319,27 @@ function renderRuns(data) {
     .map(
       (run) => `
       <tr>
-        <td title="${esc(run.run_id)}">${esc((run.run_id || "").slice(0, 16))}</td>
+        <td title="${esc(run.run_id)}">
+          <button class="btn-link" data-run-download="${esc(run.run_id)}">${esc((run.run_id || "").slice(0, 16))}</button>
+        </td>
         <td>${statusChip(run.status)}</td>
         <td>${statusChip(run.cloud_status || "pending")}</td>
       </tr>
     `
     )
     .join("");
+
+  runsBody.querySelectorAll("[data-run-download]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const runId = btn.getAttribute("data-run-download");
+      try {
+        await downloadFromApi(`/api/runs/${encodeURIComponent(runId)}/download`, `${runId}.json`);
+        showToast(`Downloaded run payload: ${runId}`);
+      } catch (err) {
+        showToast(`Run download failed: ${err.message}`, true);
+      }
+    });
+  });
 }
 
 async function loadTriggerLog(jobId) {
@@ -431,6 +501,15 @@ runFullTriggerBtn.addEventListener("click", async () => {
     await loadTriggerLog(data.id);
   } catch (err) {
     showToast(`Full trigger failed: ${err.message}`, true);
+  }
+});
+
+downloadLatestPayloadBtn.addEventListener("click", async () => {
+  try {
+    await downloadFromApi("/api/runs/latest/download", "latest_payload.json");
+    showToast("Latest payload downloaded");
+  } catch (err) {
+    showToast(`Payload download failed: ${err.message}`, true);
   }
 });
 

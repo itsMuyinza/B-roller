@@ -189,6 +189,12 @@
     - Character-model-first generation control.
     - Scrollable script editor panel with save support.
     - Scene jobs queue + full trigger jobs queue with log tail.
+  - Added download features:
+    - Per-scene image/video download endpoints.
+    - Latest payload JSON download button.
+    - Run-specific payload download from Recent Runs.
+  - Improved dashboard UI polish with glassmorphic visual system and sticky actions column.
+  - Fixed simulated dry-run media preview handling to prevent broken-media rendering.
   - Validation run (dry): `python3 tools/run_phase5_trigger.py --dry-run` succeeded, scene_count=8.
   - Validation run (live transfer): cloud upload succeeded to Cloudinary fallback.
   - Observed error: Supabase target table missing (`PGRST205`, table `public.aprt_story_payloads` not found).

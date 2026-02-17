@@ -9,6 +9,10 @@ Local Airtable-style board for scene-level prompt editing and media triggers.
 - Triggers image generation per scene.
 - Triggers video generation per scene (requires scene image).
 - Supports batch triggers for missing images/videos.
+- Downloads:
+  - Per-scene image and video (live assets only).
+  - Latest payload JSON from the top action bar.
+  - Any run payload from Recent Runs.
 - Displays scene job queue + full trigger job queue + log tail.
 - Includes a scrollable script editor panel.
 
@@ -34,6 +38,9 @@ Open:
 - `POST /api/character/generate`
 - `GET /api/script`
 - `PATCH /api/script`
+- `GET /api/scenes/<scene_id>/download/<image|video>`
+- `GET /api/runs/latest/download`
+- `GET /api/runs/<run_id>/download`
 - `GET /api/jobs`
 - `GET /api/jobs/<job_id>/log`
 - `POST /api/trigger`

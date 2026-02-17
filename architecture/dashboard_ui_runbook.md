@@ -25,7 +25,11 @@ python3 dashboard/app.py
 4. Generate videos:
    - Per-row: `Generate Video`
    - Batch: `Generate Missing Videos`
-5. Monitor queues:
+5. Download outputs:
+   - Per-row: `Download Image`, `Download Video` (enabled only for live assets).
+   - Top bar: `Download Latest Payload`.
+   - Recent Runs: click run id to download that run payload.
+6. Monitor queues:
    - Scene Jobs queue for per-scene stages.
    - Full Trigger Jobs queue for full pipeline runs.
 

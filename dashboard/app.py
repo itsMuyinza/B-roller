@@ -15,11 +15,11 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
 import yaml
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -48,6 +48,10 @@ app = Flask(__name__, template_folder="templates", static_folder="static")
 
 class DashboardError(RuntimeError):
     """Raised for user-visible failures."""
+
+
+def is_simulated_url(url: str) -> bool:
+    return isinstance(url, str) and url.startswith("https://dry-run.local/")
 
 
 def utc_now() -> str:
@@ -634,6 +638,40 @@ def choose_primary_url(urls: List[str], kind: str) -> str:
     return urls[0]
 
 
+def latest_payload_path() -> Optional[pathlib.Path]:
+    if not RUN_DIR.exists():
+        return None
+    payloads = sorted(RUN_DIR.glob("payload_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return payloads[0] if payloads else None
+
+
+def stream_file_response(path: pathlib.Path, download_name: str, mimetype: str = "application/octet-stream") -> Response:
+    def generate() -> Iterable[bytes]:
+        with path.open("rb") as fh:
+            while True:
+                chunk = fh.read(64 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+
+    headers = {"Content-Disposition": f'attachment; filename="{download_name}"'}
+    return Response(stream_with_context(generate()), headers=headers, mimetype=mimetype)
+
+
+def stream_remote_url_response(url: str, download_name: str) -> Response:
+    response = requests.get(url, stream=True, timeout=90)
+    response.raise_for_status()
+    content_type = response.headers.get("Content-Type") or mimetypes.guess_type(url)[0] or "application/octet-stream"
+    headers = {"Content-Disposition": f'attachment; filename="{download_name}"'}
+
+    def generate() -> Iterable[bytes]:
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            if chunk:
+                yield chunk
+
+    return Response(stream_with_context(generate()), headers=headers, mimetype=content_type)
+
+
 class WaveSpeedClient:
     def __init__(self, api_key: str, timeout_sec: int = 90) -> None:
         self.api_key = api_key
@@ -1044,6 +1082,11 @@ def index() -> str:
     return render_template("index.html")
 
 
+@app.get("/favicon.ico")
+def favicon() -> Any:
+    return Response(status=204)
+
+
 @app.get("/api/overview")
 def api_overview() -> Any:
     reconcile_trigger_jobs()
@@ -1239,6 +1282,52 @@ def api_run_detail(run_id: str) -> Any:
     if payload is None:
         return jsonify({"error": "run not found"}), 404
     return jsonify(payload)
+
+
+@app.get("/api/runs/<run_id>/download")
+def api_run_download(run_id: str) -> Any:
+    payload = read_payload_by_run_id(run_id)
+    if payload is None:
+        return jsonify({"error": "run not found"}), 404
+    filename = f"{run_id}.json"
+    raw = json.dumps(payload, indent=2, ensure_ascii=True).encode("utf-8")
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return Response(raw, headers=headers, mimetype="application/json")
+
+
+@app.get("/api/runs/latest/download")
+def api_latest_run_download() -> Any:
+    path = latest_payload_path()
+    if path is None or not path.exists():
+        return jsonify({"error": "No payload file available"}), 404
+    return stream_file_response(path, download_name=path.name, mimetype="application/json")
+
+
+@app.get("/api/scenes/<scene_id>/download/<asset_kind>")
+def api_scene_asset_download(scene_id: str, asset_kind: str) -> Any:
+    scene = get_scene(scene_id)
+    if scene is None:
+        return jsonify({"error": "scene not found"}), 404
+
+    normalized = asset_kind.strip().lower()
+    if normalized not in {"image", "video"}:
+        return jsonify({"error": "asset_kind must be image or video"}), 400
+
+    url = scene.get("image_url") if normalized == "image" else scene.get("video_url")
+    if not isinstance(url, str) or not url.strip():
+        return jsonify({"error": f"No {normalized} URL for scene {scene_id}"}), 404
+    if is_simulated_url(url):
+        return jsonify({"error": "Dry-run assets are simulated and cannot be downloaded"}), 400
+
+    ext_guess = mimetypes.guess_extension(mimetypes.guess_type(url)[0] or "") or (".png" if normalized == "image" else ".mp4")
+    safe_ext = ".bin" if ext_guess == ".jpe" else ext_guess
+    download_name = f"{scene_id}_{normalized}{safe_ext}"
+    try:
+        return stream_remote_url_response(url, download_name=download_name)
+    except requests.HTTPError as exc:
+        return jsonify({"error": f"Download failed: {exc}"}), 502
+    except requests.RequestException as exc:
+        return jsonify({"error": f"Network error while downloading asset: {exc}"}), 502
 
 
 @app.get("/api/jobs")
