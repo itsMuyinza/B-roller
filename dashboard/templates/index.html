@@ -22,8 +22,8 @@
         <label class="control">
           Generation Mode
           <select id="modeSelect">
-            <option value="dry">Dry Run</option>
             <option value="live">Live Run</option>
+            <option value="dry">Dry Run (Simulated)</option>
           </select>
         </label>
         <label class="control">
@@ -94,6 +94,14 @@
             <label class="character-field">
               <span>Style Reference Images (one URL per line)</span>
               <textarea id="characterRefsInput" class="character-textarea"></textarea>
+            </label>
+            <label class="character-field">
+              <span>Style Description (pulled from reference style, text-only guidance)</span>
+              <textarea id="styleDescriptionInput" class="character-textarea"></textarea>
+            </label>
+            <label class="character-field character-check">
+              <input id="useStyleRefsCheckbox" type="checkbox" />
+              <span>Use style reference images directly for scene generation (can leak source characters)</span>
             </label>
             <div class="character-buttons">
               <button id="saveCharacterConfigBtn" class="btn btn-muted">Save Character Settings</button>

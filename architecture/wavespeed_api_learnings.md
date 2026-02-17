@@ -6,7 +6,8 @@
 - Image-to-video model (this project):
   - `POST https://api.wavespeed.ai/api/v3/wavespeed-ai/wan-2.2/image-to-video`
 - Polling:
-  - `GET https://api.wavespeed.ai/api/v3/predictions/{task-id}`
+  - `GET https://api.wavespeed.ai/api/v3/predictions/{task-id}/result`
+  - Legacy fallback (some docs/examples only): `GET .../predictions/{task-id}` may return `404`
 - Binary upload:
   - `POST https://api.wavespeed.ai/api/v3/media/upload/binary`
 
@@ -18,7 +19,8 @@
   - Requires `input.prompt` and `input.images[]`.
 - WAN 2.2 image-to-video:
   - Requires `input.image` and `input.prompt`.
-  - Use `duration=6`, `resolution=720p` for Shorts-ready clips.
+  - `duration` must be `5` or `8` (provider rejects `6` with HTTP 400).
+  - Use `resolution=720p` for Shorts-ready clips.
   - Scene video generation must be blocked until scene image URL exists.
 
 ## Character Consistency Pattern
@@ -45,3 +47,5 @@
   - Added generation prompt style guardrail to reduce unintended anime/Goku bias:
     - `not anime`, `not Dragon Ball`, `not Goku` appended to effective character + scene prompts.
   - Added character-name anchoring in effective prompts so each scene keeps the same named subject.
+  - Fixed polling endpoint mismatch: switched provider reconciliation to `.../predictions/{task-id}/result` after `404` failures on `.../predictions/{task-id}`.
+  - Added duration guardrail for WAN 2.2: normalize unsupported `video_duration_seconds` values (for example `6`) to `5`.

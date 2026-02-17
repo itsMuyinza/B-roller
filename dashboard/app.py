@@ -47,14 +47,22 @@ ACTIVE_TRIGGER_LOCK = threading.Lock()
 ACTIVE_SCENE_JOBS: Dict[Tuple[str, str], Dict[str, Any]] = {}
 ACTIVE_SCENE_LOCK = threading.Lock()
 REF_CACHE: Dict[str, str] = {}
+STYLE_DESC_CACHE: Dict[str, str] = {}
 BOOTSTRAPPED = False
 BOOTSTRAP_LOCK = threading.Lock()
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
-CARTOON_STYLE_GUARDRAIL = (
-    "Visual style lock: stylized western cartoon / editorial 3D-cartoon look. "
-    "Not anime. Not Dragon Ball. Not Goku. No anime aura or spiky anime hair."
+DEFAULT_STYLE_DESCRIPTION = (
+    "anime-inspired cel-shaded style, cinematic framing, expressive linework, clean gradients, "
+    "bold silhouettes, and high-contrast lighting"
+)
+STYLE_IP_GUARDRAIL = (
+    "Depict only an original character design. Do not depict any recognizable copyrighted franchise anime or manga character."
+)
+REFERENCE_USAGE_GUARDRAIL = (
+    "Use reference images for style only (palette, texture, line weight, lighting, composition), "
+    "never for copying characters."
 )
 SERVERLESS_ENV_KEYS = ("VERCEL", "NOW_REGION", "AWS_REGION")
 
@@ -235,8 +243,103 @@ def contains_case_insensitive(text: str, phrase: str) -> bool:
     return re.search(re.escape(phrase.strip()), text, flags=re.IGNORECASE) is not None
 
 
+def sanitize_style_description(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return DEFAULT_STYLE_DESCRIPTION
+    banned_patterns = [
+        r"\bgoku\b",
+        r"\bdragon\s*ball\b",
+        r"\bdragonball\b",
+        r"\bvegeta\b",
+        r"\bgohan\b",
+        r"\bnaruto\b",
+        r"\bluffy\b",
+        r"\bsasuke\b",
+        r"\bitachi\b",
+    ]
+    for pattern in banned_patterns:
+        text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" ,.;")
+    return text or DEFAULT_STYLE_DESCRIPTION
+
+
+def get_style_description_from_config(config: Dict[str, Any]) -> str:
+    raw = config.get("style_description")
+    if isinstance(raw, str) and raw.strip():
+        return sanitize_style_description(raw)
+    refs = config.get("style_reference_images", [])
+    inferred = infer_style_description_from_refs(refs if isinstance(refs, list) else [])
+    if inferred:
+        return sanitize_style_description(inferred)
+    return sanitize_style_description(DEFAULT_STYLE_DESCRIPTION)
+
+
+def style_guardrail_text(style_description: str) -> str:
+    safe_style = sanitize_style_description(style_description)
+    return (
+        f"Style direction: {safe_style}. "
+        f"{REFERENCE_USAGE_GUARDRAIL} {STYLE_IP_GUARDRAIL}"
+    ).strip()
+
+
+def should_use_style_reference_images(config: Dict[str, Any]) -> bool:
+    generation = config.get("generation", {})
+    if isinstance(generation, dict) and isinstance(generation.get("use_style_reference_images"), bool):
+        return bool(generation.get("use_style_reference_images"))
+    return False
+
+
+def infer_style_description_from_refs(refs: List[str]) -> str:
+    for ref in refs:
+        if not isinstance(ref, str) or not ref.strip():
+            continue
+        inferred = infer_style_description_from_ref(ref.strip())
+        if inferred:
+            return inferred
+    return ""
+
+
+def infer_style_description_from_ref(ref: str) -> str:
+    if ref in STYLE_DESC_CACHE:
+        return STYLE_DESC_CACHE[ref]
+    try:
+        response = requests.get(ref, timeout=20, allow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
+        response.raise_for_status()
+        text = response.text.lower() if "text/html" in (response.headers.get("Content-Type", "").lower()) else ref.lower()
+        if re.search(r"\banime\b|\bmanga\b|\bcel[- ]?shad", text):
+            STYLE_DESC_CACHE[ref] = DEFAULT_STYLE_DESCRIPTION
+            return STYLE_DESC_CACHE[ref]
+        if re.search(r"\bcartoon\b|\billustration\b", text):
+            STYLE_DESC_CACHE[ref] = (
+                "stylized anime-cartoon blend, cel-shaded rendering, bold outlines, cinematic color grading"
+            )
+            return STYLE_DESC_CACHE[ref]
+    except Exception:
+        pass
+    STYLE_DESC_CACHE[ref] = ""
+    return ""
+
+
+def strip_legacy_style_clauses(text: str) -> str:
+    out = text
+    patterns = [
+        r"Visual style lock:[^.]+(?:\.[^.]+)*\.",
+        r"Not anime\.",
+        r"Not Goku\.",
+        r"No Goku\.",
+        r"No Dragon Ball characters\.",
+        r"No anime aura or spiky anime hair\.",
+        r"Do not copy any copyrighted anime character or specific reference subject\.",
+    ]
+    for pattern in patterns:
+        out = re.sub(pattern, " ", out, flags=re.IGNORECASE)
+    out = re.sub(r"\s+", " ", out).strip()
+    return out
+
+
 def ensure_character_in_prompt(prompt: str, character_name: str, kind: str) -> str:
-    base = prompt.strip()
+    base = strip_legacy_style_clauses(prompt.strip())
     if not base:
         base = "Story beat visual prompt."
     if character_name.strip() and not contains_case_insensitive(base, character_name):
@@ -244,17 +347,20 @@ def ensure_character_in_prompt(prompt: str, character_name: str, kind: str) -> s
             base = f"{base} Keep {character_name} clearly visible and on-model throughout the motion."
         else:
             base = f"{base} Feature {character_name} as the primary on-screen character."
-    return base
-
-
-def normalize_scene_prompt_with_guardrails(prompt: str, character_name: str, kind: str) -> str:
-    base = ensure_character_in_prompt(prompt, character_name, kind)
-    if not contains_case_insensitive(base, CARTOON_STYLE_GUARDRAIL):
-        base = f"{base} {CARTOON_STYLE_GUARDRAIL}"
     return base.strip()
 
 
-def enforce_scene_prompts_with_character_name(character_name: str, persist_payload: bool = True) -> Dict[str, int]:
+def normalize_scene_prompt_with_guardrails(prompt: str, character_name: str, kind: str, style_description: str) -> str:
+    base = ensure_character_in_prompt(prompt, character_name, kind)
+    guard = style_guardrail_text(style_description)
+    if not contains_case_insensitive(base, STYLE_IP_GUARDRAIL):
+        base = f"{base} {guard}"
+    return base.strip()
+
+
+def enforce_scene_prompts_with_character_name(
+    character_name: str, style_description: str, persist_payload: bool = True
+) -> Dict[str, int]:
     character_name = character_name.strip()
     config = load_payload_config()
     scenes = config.get("scenes", [])
@@ -269,8 +375,8 @@ def enforce_scene_prompts_with_character_name(character_name: str, persist_paylo
         scene_id = str(scene.get("scene_id", "")).strip()
         image_before = str(scene.get("image_prompt", "")).strip()
         motion_before = str(scene.get("motion_prompt", "")).strip()
-        image_after = normalize_scene_prompt_with_guardrails(image_before, character_name, "image")
-        motion_after = normalize_scene_prompt_with_guardrails(motion_before, character_name, "motion")
+        image_after = normalize_scene_prompt_with_guardrails(image_before, character_name, "image", style_description)
+        motion_after = normalize_scene_prompt_with_guardrails(motion_before, character_name, "motion", style_description)
 
         if image_after != image_before or motion_after != motion_before:
             scene["image_prompt"] = image_after
@@ -294,28 +400,40 @@ def get_character_config() -> Dict[str, Any]:
     refs = config.get("style_reference_images", [])
     if not isinstance(refs, list):
         refs = []
+    style_description = get_style_description_from_config(config)
     name = str(character.get("name", "")).strip()
     model_prompt = str(character.get("character_model_prompt", "")).strip()
     notes = str(character.get("consistency_notes", "")).strip()
-    effective_prompt = build_character_prompt(name=name, model_prompt=model_prompt, consistency_notes=notes)
+    effective_prompt = build_character_prompt(
+        name=name,
+        model_prompt=model_prompt,
+        consistency_notes=notes,
+        style_description=style_description,
+    )
     return {
         "name": name,
         "character_model_prompt": model_prompt,
         "consistency_notes": notes,
+        "style_description": style_description,
+        "use_style_reference_images": should_use_style_reference_images(config),
         "style_reference_images": [str(item).strip() for item in refs if str(item).strip()],
-        "style_guardrail": CARTOON_STYLE_GUARDRAIL,
+        "style_guardrail": style_guardrail_text(style_description),
         "effective_prompt": effective_prompt,
     }
 
 
-def build_character_prompt(*, name: str, model_prompt: str, consistency_notes: str) -> str:
+def build_character_prompt(*, name: str, model_prompt: str, consistency_notes: str, style_description: str) -> str:
     parts: List[str] = []
-    raw_prompt = model_prompt.strip()
+    raw_prompt = strip_legacy_style_clauses(model_prompt.strip())
     if raw_prompt:
         parts.append(raw_prompt)
     if name.strip() and not contains_case_insensitive(raw_prompt, name):
         parts.append(f"Character name: {name}.")
-    parts.append(CARTOON_STYLE_GUARDRAIL)
+    has_style_guard = contains_case_insensitive(raw_prompt, STYLE_IP_GUARDRAIL) and contains_case_insensitive(
+        raw_prompt, REFERENCE_USAGE_GUARDRAIL
+    )
+    if not has_style_guard:
+        parts.append(style_guardrail_text(style_description))
     if consistency_notes.strip():
         parts.append(f"Consistency requirements: {consistency_notes.strip()}")
     return " ".join(parts).strip()
@@ -343,6 +461,13 @@ def update_character_config(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     config["character"] = character
 
+    if "style_description" in payload:
+        config["style_description"] = sanitize_style_description(str(payload.get("style_description", "")).strip())
+    if "use_style_reference_images" in payload:
+        generation = config.get("generation", {}) if isinstance(config.get("generation"), dict) else {}
+        generation["use_style_reference_images"] = bool(payload.get("use_style_reference_images"))
+        config["generation"] = generation
+
     if "style_reference_images" in payload:
         refs = parse_style_reference_images(payload.get("style_reference_images"))
         config["style_reference_images"] = refs
@@ -350,10 +475,12 @@ def update_character_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     saved_path = save_payload_config(config)
     sync_scenes_from_payload()
     character_name = str(character.get("name", "")).strip()
-    normalized = enforce_scene_prompts_with_character_name(character_name, persist_payload=True) if character_name else {
-        "payload_updates": 0,
-        "db_updates": 0,
-    }
+    style_description = get_style_description_from_config(config)
+    normalized = (
+        enforce_scene_prompts_with_character_name(character_name, style_description, persist_payload=True)
+        if character_name
+        else {"payload_updates": 0, "db_updates": 0}
+    )
     return {
         "saved_path": saved_path,
         "character_config": get_character_config(),
@@ -364,16 +491,24 @@ def update_character_config(payload: Dict[str, Any]) -> Dict[str, Any]:
 def get_generation_config() -> Dict[str, Any]:
     cfg = load_payload_config()
     generation = cfg.get("generation") if isinstance(cfg.get("generation"), dict) else {}
+    image_model = generation.get("image_model", "google/nano-banana-pro/edit")
+    video_model = generation.get("video_model", "wavespeed-ai/wan-2.2/image-to-video")
+    raw_duration = int(generation.get("video_duration_seconds", 5))
+    video_duration = raw_duration
+    # WaveSpeed WAN 2.2 currently accepts duration values of 5 or 8 seconds.
+    if "wan-2.2/image-to-video" in str(video_model).lower() and raw_duration not in {5, 8}:
+        video_duration = 5
     return {
-        "image_model": generation.get("image_model", "google/nano-banana-pro/edit"),
-        "video_model": generation.get("video_model", "wavespeed-ai/wan-2.2/image-to-video"),
+        "image_model": image_model,
+        "video_model": video_model,
         "image_resolution": generation.get("image_resolution", "1k"),
         "image_output_format": generation.get("image_output_format", "png"),
         "video_resolution": generation.get("video_resolution", "720p"),
-        "video_duration_seconds": int(generation.get("video_duration_seconds", 6)),
+        "video_duration_seconds": video_duration,
         "movement_amplitude": generation.get("movement_amplitude", "auto"),
         "generate_audio": bool(generation.get("generate_audio", True)),
         "bgm": bool(generation.get("bgm", True)),
+        "use_style_reference_images": bool(generation.get("use_style_reference_images", False)),
         "poll_interval_seconds": int(generation.get("poll_interval_seconds", 5)),
         "poll_timeout_seconds": int(generation.get("poll_timeout_seconds", 1200)),
     }
@@ -492,8 +627,9 @@ def bootstrap_once() -> None:
         cfg = load_payload_config()
         character = cfg.get("character", {}) if isinstance(cfg.get("character"), dict) else {}
         character_name = str(character.get("name", "")).strip()
+        style_description = get_style_description_from_config(cfg)
         if character_name:
-            enforce_scene_prompts_with_character_name(character_name, persist_payload=False)
+            enforce_scene_prompts_with_character_name(character_name, style_description, persist_payload=False)
         BOOTSTRAPPED = True
 
 
@@ -620,6 +756,18 @@ def update_scene_job(
         )
 
 
+def set_scene_job_task_id(job_id: str, task_id: str) -> None:
+    with db_conn() as conn:
+        conn.execute(
+            """
+            update scene_jobs
+            set task_id = ?
+            where id = ?
+            """,
+            (task_id, job_id),
+        )
+
+
 def list_scene_jobs(limit: int = 120) -> List[Dict[str, Any]]:
     with db_conn() as conn:
         rows = conn.execute(
@@ -715,6 +863,11 @@ def reconcile_trigger_jobs() -> None:
             done_ids.append(job_id)
         for job_id in done_ids:
             ACTIVE_TRIGGER_JOBS.pop(job_id, None)
+
+
+def reconcile_provider_jobs() -> None:
+    refresh_character_state_from_provider()
+    refresh_running_scene_jobs_from_provider()
 
 
 def summarize_payload(path: pathlib.Path) -> Optional[Dict[str, Any]]:
@@ -943,25 +1096,65 @@ class WaveSpeedClient:
 
     def submit_task(self, model_path: str, input_payload: Dict[str, Any]) -> Dict[str, Any]:
         endpoint = f"{WAVESPEED_API_BASE}/{model_path}"
-        body = {
+        wrapped_body = {
             "enable_base64_output": False,
             "input": input_payload,
         }
-        response = requests.post(endpoint, headers=self._headers(), json=body, timeout=self.timeout_sec)
-        response.raise_for_status()
+        response = requests.post(endpoint, headers=self._headers(), json=wrapped_body, timeout=self.timeout_sec)
+
+        # Some models/endpoints expect prompt/image fields at top level instead of under "input".
+        if not response.ok and response.status_code == 400:
+            fallback_body: Dict[str, Any] = {"enable_base64_output": False}
+            fallback_body.update(input_payload)
+            fallback = requests.post(endpoint, headers=self._headers(), json=fallback_body, timeout=self.timeout_sec)
+            if fallback.ok:
+                response = fallback
+            else:
+                detail = fallback.text.strip() or response.text.strip()
+                if len(detail) > 700:
+                    detail = detail[:700] + "..."
+                raise DashboardError(f"WaveSpeed submit failed ({fallback.status_code}): {detail}")
+
+        if not response.ok:
+            detail = response.text.strip()
+            if len(detail) > 700:
+                detail = detail[:700] + "..."
+            raise DashboardError(f"WaveSpeed submit failed ({response.status_code}): {detail}")
+
         payload = response.json()
         task_id = extract_task_id(payload)
         if not task_id:
             raise DashboardError(f"WaveSpeed did not return task id for {model_path}.")
         return payload
 
+    def get_task(self, task_id: str) -> Dict[str, Any]:
+        endpoints = [
+            f"{WAVESPEED_API_BASE}/predictions/{task_id}/result",
+            f"{WAVESPEED_API_BASE}/predictions/{task_id}",
+        ]
+        last_404 = False
+        for endpoint in endpoints:
+            response = requests.get(endpoint, headers={"Authorization": f"Bearer {self.api_key}"}, timeout=self.timeout_sec)
+            if response.status_code == 404:
+                last_404 = True
+                continue
+            if not response.ok:
+                detail = response.text.strip()
+                if len(detail) > 700:
+                    detail = detail[:700] + "..."
+                raise DashboardError(f"WaveSpeed task lookup failed ({response.status_code}): {detail}")
+            try:
+                return response.json()
+            except ValueError as exc:
+                raise DashboardError(f"WaveSpeed task lookup returned non-JSON for task {task_id}.") from exc
+        if last_404:
+            raise DashboardError(f"WaveSpeed task lookup failed for {task_id}: endpoint not found.")
+        raise DashboardError(f"WaveSpeed task lookup failed for {task_id}.")
+
     def poll_task(self, task_id: str, poll_interval_sec: int, timeout_sec: int) -> Dict[str, Any]:
-        endpoint = f"{WAVESPEED_API_BASE}/predictions/{task_id}"
         started = time.time()
         while True:
-            response = requests.get(endpoint, headers={"Authorization": f"Bearer {self.api_key}"}, timeout=self.timeout_sec)
-            response.raise_for_status()
-            payload = response.json()
+            payload = self.get_task(task_id)
             status = normalize_status(payload)
             if status in SUCCESS_STATUSES:
                 return payload
@@ -1064,22 +1257,166 @@ def update_character_state(
     set_meta("character_updated_at", utc_now())
 
 
+def refresh_character_state_from_provider() -> None:
+    state = get_character_state()
+    if (state.get("status") or "").lower() != "running":
+        return
+    task_id = str(state.get("task_id") or "").strip()
+    if not task_id:
+        return
+    api_key = os.getenv("WAVESPEED_API_KEY", "").strip()
+    if not api_key:
+        return
+    try:
+        payload = WaveSpeedClient(api_key=api_key, timeout_sec=15).get_task(task_id)
+        status = normalize_status(payload)
+        if status in SUCCESS_STATUSES:
+            urls = collect_urls(payload.get("output", payload))
+            image_url = choose_primary_url(urls, kind="image")
+            update_character_state(status="completed", task_id=task_id, image_url=image_url, last_error=None)
+        elif status in FAIL_STATUSES:
+            update_character_state(
+                status="failed",
+                task_id=task_id,
+                image_url=None,
+                last_error=extract_error_message(payload),
+            )
+    except Exception:
+        return
+
+
+def refresh_running_scene_jobs_from_provider(max_jobs: int = 10) -> None:
+    api_key = os.getenv("WAVESPEED_API_KEY", "").strip()
+    if not api_key:
+        return
+    with db_conn() as conn:
+        rows = conn.execute(
+            """
+            select id, scene_id, stage, task_id
+            from scene_jobs
+            where status = 'running' and task_id is not null and task_id != ''
+            order by requested_at asc
+            limit ?
+            """,
+            (max_jobs,),
+        ).fetchall()
+    if not rows:
+        return
+
+    client = WaveSpeedClient(api_key=api_key, timeout_sec=15)
+    for row in rows:
+        job_id = row["id"]
+        scene_id = row["scene_id"]
+        stage = row["stage"]
+        task_id = row["task_id"]
+        if not scene_id or not stage or not task_id:
+            continue
+        try:
+            payload = client.get_task(task_id)
+        except Exception:
+            continue
+        status = normalize_status(payload)
+        if status in SUCCESS_STATUSES:
+            try:
+                urls = collect_urls(payload.get("output", payload))
+                url = choose_primary_url(urls, kind=stage)
+            except Exception as exc:  # noqa: BLE001
+                msg = str(exc)
+                if stage == "image":
+                    update_scene_fields(scene_id, {"image_status": "failed", "last_error": msg})
+                else:
+                    update_scene_fields(scene_id, {"video_status": "failed", "last_error": msg})
+                update_scene_job(job_id, status="failed", task_id=task_id, error=msg)
+                continue
+
+            if stage == "image":
+                update_scene_fields(
+                    scene_id,
+                    {
+                        "image_status": "completed",
+                        "image_task_id": task_id,
+                        "image_url": url,
+                        "video_status": "pending",
+                        "video_task_id": None,
+                        "video_url": None,
+                        "last_error": None,
+                    },
+                )
+            else:
+                update_scene_fields(
+                    scene_id,
+                    {
+                        "video_status": "completed",
+                        "video_task_id": task_id,
+                        "video_url": url,
+                        "last_error": None,
+                    },
+                )
+            update_scene_job(job_id, status="completed", task_id=task_id, result_url=url, error=None)
+            continue
+
+        if status in FAIL_STATUSES:
+            msg = extract_error_message(payload)
+            if stage == "image":
+                update_scene_fields(scene_id, {"image_status": "failed", "last_error": msg})
+            else:
+                update_scene_fields(scene_id, {"video_status": "failed", "last_error": msg})
+            update_scene_job(job_id, status="failed", task_id=task_id, error=msg)
+
+
 def get_style_reference_urls(dry_run: bool, client: Optional[WaveSpeedClient]) -> List[str]:
     config = load_payload_config()
     refs = config.get("style_reference_images", [])
     if not isinstance(refs, list):
         refs = []
+    if not refs:
+        return []
     return resolve_reference_images(refs, dry_run=dry_run, client=client)
 
 
-def generate_character_model(dry_run: bool) -> Dict[str, str]:
+def preflight_character_for_scene_images(*, dry_run: bool) -> None:
+    if dry_run:
+        return
+    refresh_character_state_from_provider()
+    state = get_character_state()
+    image_url = str(state.get("image_url") or "").strip()
+    if image_url:
+        return
+
+    status = str(state.get("status") or "").strip().lower()
+    task_id = str(state.get("task_id") or "").strip()
+    last_error = str(state.get("last_error") or "").strip()
+
+    if status == "failed":
+        suffix = f": {last_error}" if last_error else ""
+        raise DashboardError(f"Character model generation failed{suffix}")
+    if status == "running":
+        suffix = f" (task {task_id})" if task_id else ""
+        raise DashboardError(f"Character model is still generating{suffix}. Wait until it completes, then retry scene image.")
+
+    if is_serverless_runtime():
+        generated = generate_character_model(dry_run=False, submit_only=True)
+        new_task = generated.get("task_id", "")
+        suffix = f" (task {new_task})" if new_task else ""
+        raise DashboardError(
+            f"Character model generation started{suffix}. Wait until status is completed, then retry scene image."
+        )
+
+
+def generate_character_model(dry_run: bool, submit_only: bool = False) -> Dict[str, str]:
     config = load_payload_config()
     generation = get_generation_config()
     character = config.get("character", {}) if isinstance(config.get("character"), dict) else {}
     name = str(character.get("name", "")).strip()
     model_prompt = str(character.get("character_model_prompt", "")).strip()
     consistency_notes = str(character.get("consistency_notes", "")).strip()
-    prompt = build_character_prompt(name=name, model_prompt=model_prompt, consistency_notes=consistency_notes)
+    style_description = get_style_description_from_config(config)
+    prompt = build_character_prompt(
+        name=name,
+        model_prompt=model_prompt,
+        consistency_notes=consistency_notes,
+        style_description=style_description,
+    )
     if not prompt:
         raise DashboardError("Character model prompt is missing in payload config.")
 
@@ -1091,10 +1428,12 @@ def generate_character_model(dry_run: bool) -> Dict[str, str]:
 
     client = get_wavespeed_client()
     style_refs = get_style_reference_urls(dry_run=False, client=client)
+    if not style_refs:
+        raise DashboardError("At least one style reference image is required for character generation.")
     update_character_state(status="running", task_id=None, image_url=None, last_error=None)
 
     try:
-        payload = {
+        payload: Dict[str, Any] = {
             "prompt": prompt,
             "images": style_refs,
             "resolution": generation["image_resolution"],
@@ -1102,6 +1441,9 @@ def generate_character_model(dry_run: bool) -> Dict[str, str]:
         }
         submit = client.submit_task(generation["image_model"], payload)
         task_id = extract_task_id(submit) or ""
+        if submit_only:
+            update_character_state(status="running", task_id=task_id, image_url=None, last_error=None)
+            return {"task_id": task_id, "image_url": ""}
         result = client.poll_task(task_id, generation["poll_interval_seconds"], generation["poll_timeout_seconds"])
         urls = collect_urls(result.get("output", result))
         image_url = choose_primary_url(urls, kind="image")
@@ -1112,7 +1454,7 @@ def generate_character_model(dry_run: bool) -> Dict[str, str]:
         raise
 
 
-def generate_scene_image(scene_id: str, dry_run: bool) -> Dict[str, str]:
+def generate_scene_image(scene_id: str, dry_run: bool, submit_only: bool = False) -> Dict[str, str]:
     scene = get_scene(scene_id)
     if scene is None:
         raise DashboardError(f"Scene not found: {scene_id}")
@@ -1121,15 +1463,44 @@ def generate_scene_image(scene_id: str, dry_run: bool) -> Dict[str, str]:
     config = load_payload_config()
     character = config.get("character", {}) if isinstance(config.get("character"), dict) else {}
     character_name = str(character.get("name", "")).strip()
+    style_description = get_style_description_from_config(config)
     client = None if dry_run else get_wavespeed_client()
 
-    character = get_character_state()
-    character_url = character.get("image_url")
+    if not dry_run:
+        refresh_character_state_from_provider()
+    character_state = get_character_state()
+    character_url = character_state.get("image_url")
     if not character_url:
-        generated = generate_character_model(dry_run=dry_run)
-        character_url = generated["image_url"]
+        if dry_run:
+            generated = generate_character_model(dry_run=True, submit_only=False)
+            character_url = generated.get("image_url")
+        else:
+            status = str(character_state.get("status") or "").strip().lower()
+            task_id = str(character_state.get("task_id") or "").strip()
+            last_error = str(character_state.get("last_error") or "").strip()
+            if status == "failed":
+                suffix = f": {last_error}" if last_error else ""
+                raise DashboardError(f"Character model generation failed{suffix}")
+            if status == "running":
+                suffix = f" (task {task_id})" if task_id else ""
+                raise DashboardError(
+                    f"Character model is still generating{suffix}. Wait until it completes, then retry scene image."
+                )
+            if is_serverless_runtime():
+                generated = generate_character_model(dry_run=False, submit_only=True)
+                new_task = generated.get("task_id", "")
+                suffix = f" (task {new_task})" if new_task else ""
+                raise DashboardError(
+                    f"Character model generation started{suffix}. Wait until status is completed, then retry scene image."
+                )
+            generated = generate_character_model(dry_run=False, submit_only=False)
+            character_url = generated.get("image_url")
+    if not character_url:
+        raise DashboardError("Character model image URL missing. Generate character model first.")
 
-    style_refs = get_style_reference_urls(dry_run=dry_run, client=client)
+    style_refs: List[str] = []
+    if generation["use_style_reference_images"]:
+        style_refs = get_style_reference_urls(dry_run=dry_run, client=client)
     extra_refs = scene.get("reference_images", [])
     if not isinstance(extra_refs, list):
         extra_refs = []
@@ -1151,6 +1522,7 @@ def generate_scene_image(scene_id: str, dry_run: bool) -> Dict[str, str]:
         str(scene.get("image_prompt", "")),
         character_name=character_name,
         kind="image",
+        style_description=style_description,
     )
 
     payload = {
@@ -1161,23 +1533,28 @@ def generate_scene_image(scene_id: str, dry_run: bool) -> Dict[str, str]:
     }
     submit = client.submit_task(generation["image_model"], payload)  # type: ignore[union-attr]
     task_id = extract_task_id(submit) or ""
+    if submit_only:
+        return {"task_id": task_id, "url": ""}
     result = client.poll_task(task_id, generation["poll_interval_seconds"], generation["poll_timeout_seconds"])  # type: ignore[union-attr]
     urls = collect_urls(result.get("output", result))
     image_url = choose_primary_url(urls, kind="image")
     return {"task_id": task_id, "url": image_url}
 
 
-def generate_scene_video(scene_id: str, dry_run: bool) -> Dict[str, str]:
+def generate_scene_video(scene_id: str, dry_run: bool, submit_only: bool = False) -> Dict[str, str]:
     scene = get_scene(scene_id)
     if scene is None:
         raise DashboardError(f"Scene not found: {scene_id}")
     if not scene.get("image_url"):
         raise DashboardError("Scene image missing. Generate image first.")
+    if not dry_run and is_simulated_url(str(scene.get("image_url", ""))):
+        raise DashboardError("Scene image is from dry-run simulation. Generate a live image first.")
 
     generation = get_generation_config()
     config = load_payload_config()
     character = config.get("character", {}) if isinstance(config.get("character"), dict) else {}
     character_name = str(character.get("name", "")).strip()
+    style_description = get_style_description_from_config(config)
     if dry_run:
         task_id = f"dry-video-{scene_id}-{uuid.uuid4().hex[:8]}"
         video_url = f"https://dry-run.local/scenes/{scene_id}/{task_id}.mp4"
@@ -1188,6 +1565,7 @@ def generate_scene_video(scene_id: str, dry_run: bool) -> Dict[str, str]:
         str(scene.get("motion_prompt", "")),
         character_name=character_name,
         kind="motion",
+        style_description=style_description,
     )
     payload = {
         "image": scene["image_url"],
@@ -1200,6 +1578,8 @@ def generate_scene_video(scene_id: str, dry_run: bool) -> Dict[str, str]:
     }
     submit = client.submit_task(generation["video_model"], payload)
     task_id = extract_task_id(submit) or ""
+    if submit_only:
+        return {"task_id": task_id, "url": ""}
     result = client.poll_task(task_id, generation["poll_interval_seconds"], generation["poll_timeout_seconds"])
     urls = collect_urls(result.get("output", result))
     video_url = choose_primary_url(urls, kind="video")
@@ -1276,6 +1656,19 @@ def start_scene_job(scene_id: str, stage: str, dry_run: bool) -> Dict[str, Any]:
     with ACTIVE_SCENE_LOCK:
         if key in ACTIVE_SCENE_JOBS:
             raise DashboardError(f"{stage} job already running for {scene_id}")
+    if is_serverless_runtime():
+        with db_conn() as conn:
+            row = conn.execute(
+                """
+                select id from scene_jobs
+                where scene_id = ? and stage = ? and status = 'running'
+                order by requested_at desc
+                limit 1
+                """,
+                (scene_id, stage),
+            ).fetchone()
+        if row is not None:
+            raise DashboardError(f"{stage} job already running for {scene_id}")
 
     if stage == "video" and not scene.get("image_url"):
         raise DashboardError("Cannot generate video before image is generated.")
@@ -1301,9 +1694,29 @@ def start_scene_job(scene_id: str, stage: str, dry_run: bool) -> Dict[str, Any]:
         update_scene_fields(scene_id, {"video_status": "running", "last_error": None})
 
     # Serverless runtimes are request-scoped, so background threads do not persist reliably.
-    # Execute inline to keep button behavior deterministic on Vercel.
+    # Dry-run executes inline; live mode submits to provider and is reconciled on refresh.
     if is_serverless_runtime():
-        run_scene_job(job_id, scene_id, stage, dry_run)
+        if not dry_run:
+            try:
+                if stage == "image":
+                    result = generate_scene_image(scene_id, dry_run=False, submit_only=True)
+                    update_scene_fields(scene_id, {"image_status": "running", "image_task_id": result["task_id"], "last_error": None})
+                else:
+                    result = generate_scene_video(scene_id, dry_run=False, submit_only=True)
+                    update_scene_fields(scene_id, {"video_status": "running", "video_task_id": result["task_id"], "last_error": None})
+                set_scene_job_task_id(job_id, result["task_id"])
+                latest = get_scene_job(job_id)
+                return latest or record
+            except Exception as exc:  # noqa: BLE001
+                msg = str(exc)
+                if stage == "image":
+                    update_scene_fields(scene_id, {"image_status": "failed", "last_error": msg})
+                else:
+                    update_scene_fields(scene_id, {"video_status": "failed", "last_error": msg})
+                update_scene_job(job_id, status="failed", error=msg)
+                raise DashboardError(msg)
+
+        run_scene_job(job_id, scene_id, stage, dry_run=True)
         latest = get_scene_job(job_id)
         return latest or record
 
@@ -1385,6 +1798,7 @@ def favicon() -> Any:
 def api_overview() -> Any:
     bootstrap_once()
     reconcile_trigger_jobs()
+    reconcile_provider_jobs()
     return jsonify(
         {
             "triggers": {
@@ -1407,6 +1821,7 @@ def api_overview() -> Any:
             "character": get_character_state(),
             "runtime": {
                 "serverless": is_serverless_runtime(),
+                "wavespeed_configured": bool(os.getenv("WAVESPEED_API_KEY", "").strip()),
             },
             "active_trigger_jobs": len(ACTIVE_TRIGGER_JOBS),
             "active_scene_jobs": len(ACTIVE_SCENE_JOBS),
@@ -1417,6 +1832,7 @@ def api_overview() -> Any:
 @app.get("/api/scenes")
 def api_scenes() -> Any:
     bootstrap_once()
+    reconcile_provider_jobs()
     return jsonify({"scenes": list_scenes()})
 
 
@@ -1428,7 +1844,9 @@ def api_update_scene(scene_id: str) -> Any:
     if scene is None:
         return jsonify({"error": "scene not found"}), 404
 
-    character_name = str(get_character_config().get("name", "")).strip()
+    character_cfg = get_character_config()
+    character_name = str(character_cfg.get("name", "")).strip()
+    style_description = str(character_cfg.get("style_description", DEFAULT_STYLE_DESCRIPTION)).strip()
     updates: Dict[str, Any] = {}
     for field in ("narration", "image_prompt", "motion_prompt"):
         if field in payload and isinstance(payload[field], str):
@@ -1436,11 +1854,11 @@ def api_update_scene(scene_id: str) -> Any:
 
     if "image_prompt" in updates:
         updates["image_prompt"] = normalize_scene_prompt_with_guardrails(
-            updates["image_prompt"], character_name, "image"
+            updates["image_prompt"], character_name, "image", style_description
         )
     if "motion_prompt" in updates:
         updates["motion_prompt"] = normalize_scene_prompt_with_guardrails(
-            updates["motion_prompt"], character_name, "motion"
+            updates["motion_prompt"], character_name, "motion", style_description
         )
 
     if "reference_images" in payload and isinstance(payload["reference_images"], list):
@@ -1477,6 +1895,7 @@ def api_generate_scene_image(scene_id: str) -> Any:
     payload = request.get_json(silent=True) or {}
     dry_run = bool(payload.get("dry_run", False))
     try:
+        preflight_character_for_scene_images(dry_run=dry_run)
         job = start_scene_job(scene_id, stage="image", dry_run=dry_run)
     except DashboardError as exc:
         return jsonify({"error": str(exc)}), 400
@@ -1510,6 +1929,10 @@ def api_generate_images_batch() -> Any:
 
     launched = []
     errors = []
+    try:
+        preflight_character_for_scene_images(dry_run=dry_run)
+    except DashboardError as exc:
+        return jsonify({"launched": [], "errors": [{"scene_id": "__character__", "error": str(exc)}]}), 400
     for scene in scenes:
         if only_missing and scene.get("image_status") == "completed" and scene.get("image_url"):
             continue
@@ -1552,12 +1975,14 @@ def api_generate_videos_batch() -> Any:
 @app.get("/api/scene-jobs")
 def api_scene_jobs() -> Any:
     bootstrap_once()
+    reconcile_provider_jobs()
     return jsonify({"jobs": list_scene_jobs()})
 
 
 @app.get("/api/character")
 def api_character() -> Any:
     bootstrap_once()
+    reconcile_provider_jobs()
     return jsonify(get_character_state())
 
 
@@ -1586,7 +2011,8 @@ def api_character_generate() -> Any:
     payload = request.get_json(silent=True) or {}
     dry_run = bool(payload.get("dry_run", False))
     try:
-        result = generate_character_model(dry_run=dry_run)
+        submit_only = is_serverless_runtime() and not dry_run
+        result = generate_character_model(dry_run=dry_run, submit_only=submit_only)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 400
     return jsonify(result), 200

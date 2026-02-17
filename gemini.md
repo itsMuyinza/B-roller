@@ -26,7 +26,7 @@
     "image_resolution": "1k|2k|4k",
     "image_output_format": "png|jpeg",
     "video_resolution": "720p",
-    "video_duration_seconds": 6,
+    "video_duration_seconds": 5,
     "movement_amplitude": "auto|small|medium|large",
     "generate_audio": true,
     "bgm": true,
@@ -207,6 +207,22 @@
   - Added serverless runtime compatibility fixes:
     - Scene jobs run inline on serverless to avoid background-thread loss.
     - Full trigger is disabled on serverless due read-only filesystem expectations in trigger scripts; UI now communicates this clearly.
+  - Fixed live provider reconciliation:
+    - Corrected WaveSpeed polling endpoint to `GET /api/v3/predictions/{task-id}/result`.
+    - Added task-lookup fallback handling for legacy endpoint variants.
+  - Fixed live video generation failures:
+    - WAN 2.2 currently accepts only `duration=5` or `duration=8`.
+    - Added duration normalization and changed default `video_duration_seconds` to `5`.
+  - Improved scene-image trigger reliability:
+    - Added character preflight for scene image generation in serverless mode.
+    - If character model is missing, dashboard now starts character generation and returns a clear "wait for completion" message instead of silent failure.
+  - Updated style guardrails for originality:
+    - Removed explicit franchise-name leakage in generation guardrails.
+    - Enforced original anime-cartoon style without copying recognizable copyrighted characters.
+  - Added media preview fallbacks in dashboard UI:
+    - Broken image/video URLs now render safe placeholders instead of broken media widgets.
+  - Improved table usability:
+    - Scene actions column is sticky in desktop table mode to reduce clipping/jank on narrower viewports.
   - Fixed simulated dry-run media preview handling to prevent broken-media rendering.
   - Validation run (dry): `python3 tools/run_phase5_trigger.py --dry-run` succeeded, scene_count=8.
   - Validation run (live transfer): cloud upload succeeded to Cloudinary fallback.

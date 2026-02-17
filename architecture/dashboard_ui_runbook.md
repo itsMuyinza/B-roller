@@ -61,3 +61,6 @@ python3 dashboard/app.py
 - Scene image/video jobs run inline in serverless mode so row actions remain reliable.
 - `Run Full Trigger` is disabled in serverless mode because trigger scripts expect writable project directories.
 - Use scene-level generation buttons in Vercel, or run full trigger from local CLI/GitHub workflow.
+- Scene-image preflight now enforces character readiness:
+  - If no character model exists, it starts character generation and returns a clear wait message.
+  - Retry scene-image generation after character status becomes `completed`.

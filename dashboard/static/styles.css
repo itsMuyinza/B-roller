@@ -239,6 +239,24 @@ table {
   min-width: 1260px;
 }
 
+#scenesTable th:last-child,
+#scenesTable td:last-child {
+  position: sticky;
+  right: 0;
+}
+
+#scenesTable th:last-child {
+  z-index: 5;
+  background: rgba(17, 27, 49, 0.97);
+}
+
+#scenesTable td:last-child {
+  z-index: 2;
+  min-width: 156px;
+  background: linear-gradient(90deg, rgba(18, 29, 52, 0.96) 0%, rgba(18, 29, 52, 0.9) 100%);
+  box-shadow: -10px 0 16px rgba(7, 12, 24, 0.18);
+}
+
 th,
 td {
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
@@ -466,6 +484,22 @@ tbody tr:hover {
   letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--muted);
+}
+
+.character-check {
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  gap: 8px;
+}
+
+.character-check input[type="checkbox"] {
+  margin-top: 2px;
+}
+
+.character-check > span {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 12px;
 }
 
 .character-field input,

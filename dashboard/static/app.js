@@ -19,6 +19,8 @@ const characterNameInput = document.getElementById("characterNameInput");
 const characterPromptInput = document.getElementById("characterPromptInput");
 const characterNotesInput = document.getElementById("characterNotesInput");
 const characterRefsInput = document.getElementById("characterRefsInput");
+const styleDescriptionInput = document.getElementById("styleDescriptionInput");
+const useStyleRefsCheckbox = document.getElementById("useStyleRefsCheckbox");
 const saveCharacterConfigBtn = document.getElementById("saveCharacterConfigBtn");
 const regenPromptsBtn = document.getElementById("regenPromptsBtn");
 const characterPromptPreview = document.getElementById("characterPromptPreview");
@@ -33,6 +35,7 @@ const toast = document.getElementById("toast");
 
 let selectedTriggerJobId = null;
 let pollInFlight = false;
+let warnedNoWaveSpeed = false;
 
 function isDryRun() {
   return modeSelect.value === "dry";
@@ -65,6 +68,42 @@ function statusChip(status) {
     ? normalized
     : "unknown";
   return `<span class="status-chip status-${safe}">${esc(status || "unknown")}</span>`;
+}
+
+function attachMediaFallbacks(root) {
+  if (!root) return;
+
+  root.querySelectorAll("img.preview, img.character-preview").forEach((img) => {
+    if (img.dataset.fallbackBound === "1") return;
+    img.dataset.fallbackBound = "1";
+    img.addEventListener(
+      "error",
+      () => {
+        const placeholder = document.createElement("div");
+        placeholder.className = "preview-placeholder";
+        placeholder.textContent = img.classList.contains("character-preview")
+          ? "Character image unavailable"
+          : "Image unavailable";
+        img.replaceWith(placeholder);
+      },
+      { once: true }
+    );
+  });
+
+  root.querySelectorAll("video.preview").forEach((video) => {
+    if (video.dataset.fallbackBound === "1") return;
+    video.dataset.fallbackBound = "1";
+    video.addEventListener(
+      "error",
+      () => {
+        const placeholder = document.createElement("div");
+        placeholder.className = "preview-placeholder";
+        placeholder.textContent = "Video unavailable";
+        video.replaceWith(placeholder);
+      },
+      { once: true }
+    );
+  });
 }
 
 async function requestJson(url, options) {
@@ -157,6 +196,7 @@ function renderCharacter(character) {
     }
     ${lastError ? `<div class="kv"><div class="k">Last Error</div><div class="v">${esc(lastError)}</div></div>` : ""}
   `;
+  attachMediaFallbacks(characterBox);
 }
 
 function renderCharacterConfig(config) {
@@ -173,6 +213,10 @@ function renderCharacterConfig(config) {
   if (document.activeElement !== characterRefsInput) {
     characterRefsInput.value = (config.style_reference_images || []).join("\n");
   }
+  if (document.activeElement !== styleDescriptionInput) {
+    styleDescriptionInput.value = config.style_description || "";
+  }
+  useStyleRefsCheckbox.checked = Boolean(config.use_style_reference_images);
   characterPromptPreview.innerHTML = `
     <div class="meta-item">
       <div class="meta-key">Style Guardrail</div>
@@ -243,7 +287,7 @@ function attachSceneEntryHandlers(entries) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ dry_run: isDryRun() }),
         });
-        showToast(`Image job started for ${sceneId}`);
+        showToast(`Image job started for ${sceneId}${isDryRun() ? " (dry simulation)" : " (live WaveSpeed)"}`);
         await Promise.all([refreshSceneJobs(), refreshScenes(), refreshCharacter()]);
       } catch (err) {
         showToast(`Image trigger failed (${sceneId}): ${err.message}`, true);
@@ -257,7 +301,7 @@ function attachSceneEntryHandlers(entries) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ dry_run: isDryRun() }),
         });
-        showToast(`Video job started for ${sceneId}`);
+        showToast(`Video job started for ${sceneId}${isDryRun() ? " (dry simulation)" : " (live WaveSpeed)"}`);
         await Promise.all([refreshSceneJobs(), refreshScenes()]);
       } catch (err) {
         showToast(`Video trigger failed (${sceneId}): ${err.message}`, true);
@@ -376,6 +420,10 @@ function renderScenes(items) {
   const tableEntries = Array.from(scenesBody.querySelectorAll("tr[data-scene-id]"));
   const cardEntries = scenesCards ? Array.from(scenesCards.querySelectorAll("article[data-scene-id]")) : [];
   attachSceneEntryHandlers([...tableEntries, ...cardEntries]);
+  attachMediaFallbacks(scenesBody);
+  if (scenesCards) {
+    attachMediaFallbacks(scenesCards);
+  }
 }
 
 function renderSceneJobs(data) {
@@ -484,6 +532,19 @@ async function refreshOverview() {
   renderTriggerInfo(data);
   renderCharacter(data.character || {});
   const runtime = data.runtime || {};
+  const wavespeedConfigured = Boolean(runtime.wavespeed_configured);
+  const liveOption = modeSelect.querySelector('option[value="live"]');
+  if (liveOption) {
+    liveOption.disabled = !wavespeedConfigured;
+  }
+  if (!wavespeedConfigured && modeSelect.value === "live") {
+    modeSelect.value = "dry";
+    if (!warnedNoWaveSpeed) {
+      showToast("WaveSpeed key is missing on this deployment. Switched to dry run.", true);
+      warnedNoWaveSpeed = true;
+    }
+  }
+
   if (runtime.serverless) {
     runFullTriggerBtn.disabled = true;
     runFullTriggerBtn.title =
@@ -559,7 +620,7 @@ genCharacterBtn.addEventListener("click", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dry_run: isDryRun() }),
     });
-    showToast("Character generation started");
+    showToast(`Character generation started${isDryRun() ? " (dry simulation)" : " (live WaveSpeed)"}`);
     await Promise.all([refreshCharacter(), refreshSceneJobs()]);
   } catch (err) {
     showToast(`Character trigger failed: ${err.message}`, true);
@@ -579,6 +640,8 @@ saveCharacterConfigBtn.addEventListener("click", async () => {
         name: characterNameInput.value,
         character_model_prompt: characterPromptInput.value,
         consistency_notes: characterNotesInput.value,
+        style_description: styleDescriptionInput.value,
+        use_style_reference_images: useStyleRefsCheckbox.checked,
         style_reference_images: refs,
       }),
     });
@@ -603,6 +666,8 @@ regenPromptsBtn.addEventListener("click", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         name: characterNameInput.value,
+        style_description: styleDescriptionInput.value,
+        use_style_reference_images: useStyleRefsCheckbox.checked,
         style_reference_images: refs,
       }),
     });
@@ -622,7 +687,7 @@ genAllImagesBtn.addEventListener("click", async () => {
       body: JSON.stringify({ dry_run: isDryRun(), only_missing: true }),
     });
     const count = (data.launched || []).length;
-    showToast(`Started ${count} image jobs`);
+    showToast(`Started ${count} image jobs${isDryRun() ? " (dry simulation)" : " (live WaveSpeed)"}`);
     await Promise.all([refreshSceneJobs(), refreshScenes(), refreshCharacter()]);
   } catch (err) {
     showToast(`Image batch failed: ${err.message}`, true);
@@ -637,7 +702,7 @@ genAllVideosBtn.addEventListener("click", async () => {
       body: JSON.stringify({ dry_run: isDryRun(), only_missing: true }),
     });
     const count = (data.launched || []).length;
-    showToast(`Started ${count} video jobs`);
+    showToast(`Started ${count} video jobs${isDryRun() ? " (dry simulation)" : " (live WaveSpeed)"}`);
     await Promise.all([refreshSceneJobs(), refreshScenes()]);
   } catch (err) {
     showToast(`Video batch failed: ${err.message}`, true);
