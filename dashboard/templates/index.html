@@ -76,7 +76,30 @@
         <section class="panel">
           <div class="panel-head">
             <h2>Character Consistency</h2>
-            <p>Model-first image consistency for all scenes.</p>
+            <p>Model-first image consistency with style lock.</p>
+          </div>
+          <div class="character-config-wrap">
+            <label class="character-field">
+              <span>Character Name</span>
+              <input id="characterNameInput" type="text" />
+            </label>
+            <label class="character-field">
+              <span>Character Model Prompt</span>
+              <textarea id="characterPromptInput" class="character-textarea"></textarea>
+            </label>
+            <label class="character-field">
+              <span>Consistency Notes</span>
+              <textarea id="characterNotesInput" class="character-textarea"></textarea>
+            </label>
+            <label class="character-field">
+              <span>Style Reference Images (one URL per line)</span>
+              <textarea id="characterRefsInput" class="character-textarea"></textarea>
+            </label>
+            <div class="character-buttons">
+              <button id="saveCharacterConfigBtn" class="btn btn-muted">Save Character Settings</button>
+              <button id="regenPromptsBtn" class="btn btn-glass">Normalize Scene Prompts</button>
+            </div>
+            <div id="characterPromptPreview" class="character-prompt-preview"></div>
           </div>
           <div id="characterBox" class="character-box"></div>
         </section>

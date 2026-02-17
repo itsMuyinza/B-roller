@@ -42,3 +42,6 @@
   - Added upload fallback path (raw binary first, multipart retry) to tolerate media upload format differences.
   - Added cloud transfer fallback (Supabase -> Cloudinary) to prevent payload sink failures from blocking completion.
   - Added Pinterest `og:image` resolver for style links so short links can be converted into model-usable image URLs.
+  - Added generation prompt style guardrail to reduce unintended anime/Goku bias:
+    - `not anime`, `not Dragon Ball`, `not Goku` appended to effective character + scene prompts.
+  - Added character-name anchoring in effective prompts so each scene keeps the same named subject.

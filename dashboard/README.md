@@ -6,6 +6,12 @@ Local Airtable-style board for scene-level prompt editing and media triggers.
 - Shows every Script 3 scene as a grid row.
 - Lets you edit `narration`, `image_prompt`, and `motion_prompt` inline.
 - Generates character model first for visual consistency.
+- Includes editable character settings panel:
+  - Character name
+  - Character model prompt
+  - Consistency notes
+  - Style reference URLs
+- Auto-normalizes scene prompts to include character name + cartoon style lock.
 - Triggers image generation per scene.
 - Triggers video generation per scene (requires scene image).
 - Supports batch triggers for missing images/videos.
@@ -35,6 +41,8 @@ Open:
 - `POST /api/scenes/generate-videos`
 - `GET /api/scene-jobs`
 - `GET /api/character`
+- `GET /api/character/config`
+- `PATCH /api/character/config`
 - `POST /api/character/generate`
 - `GET /api/script`
 - `PATCH /api/script`

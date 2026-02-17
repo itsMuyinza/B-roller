@@ -15,6 +15,13 @@ const triggerJobsBody = document.getElementById("triggerJobsBody");
 const runsBody = document.getElementById("runsBody");
 
 const characterBox = document.getElementById("characterBox");
+const characterNameInput = document.getElementById("characterNameInput");
+const characterPromptInput = document.getElementById("characterPromptInput");
+const characterNotesInput = document.getElementById("characterNotesInput");
+const characterRefsInput = document.getElementById("characterRefsInput");
+const saveCharacterConfigBtn = document.getElementById("saveCharacterConfigBtn");
+const regenPromptsBtn = document.getElementById("regenPromptsBtn");
+const characterPromptPreview = document.getElementById("characterPromptPreview");
 const triggerInfo = document.getElementById("triggerInfo");
 
 const scriptPath = document.getElementById("scriptPath");
@@ -149,6 +156,32 @@ function renderCharacter(character) {
         : `<div class="preview-placeholder">No character model image yet</div>`
     }
     ${lastError ? `<div class="kv"><div class="k">Last Error</div><div class="v">${esc(lastError)}</div></div>` : ""}
+  `;
+}
+
+function renderCharacterConfig(config) {
+  if (!config) return;
+  if (document.activeElement !== characterNameInput) {
+    characterNameInput.value = config.name || "";
+  }
+  if (document.activeElement !== characterPromptInput) {
+    characterPromptInput.value = config.character_model_prompt || "";
+  }
+  if (document.activeElement !== characterNotesInput) {
+    characterNotesInput.value = config.consistency_notes || "";
+  }
+  if (document.activeElement !== characterRefsInput) {
+    characterRefsInput.value = (config.style_reference_images || []).join("\n");
+  }
+  characterPromptPreview.innerHTML = `
+    <div class="meta-item">
+      <div class="meta-key">Style Guardrail</div>
+      <div class="meta-value">${esc(config.style_guardrail || "")}</div>
+    </div>
+    <div class="meta-item">
+      <div class="meta-key">Effective Character Prompt</div>
+      <div class="meta-value">${esc(config.effective_prompt || "")}</div>
+    </div>
   `;
 }
 
@@ -457,6 +490,11 @@ async function refreshOverview() {
   }
 }
 
+async function refreshCharacterConfig() {
+  const data = await requestJson("/api/character/config");
+  renderCharacterConfig(data);
+}
+
 async function refreshScenes() {
   const data = await requestJson("/api/scenes");
   renderScenes(data.scenes || []);
@@ -486,6 +524,7 @@ async function refreshAll() {
   try {
     await Promise.all([
       refreshOverview(),
+      refreshCharacterConfig(),
       refreshScenes(),
       refreshSceneJobs(),
       refreshRuns(),
@@ -515,6 +554,54 @@ genCharacterBtn.addEventListener("click", async () => {
     await Promise.all([refreshCharacter(), refreshSceneJobs()]);
   } catch (err) {
     showToast(`Character trigger failed: ${err.message}`, true);
+  }
+});
+
+saveCharacterConfigBtn.addEventListener("click", async () => {
+  try {
+    const refs = characterRefsInput.value
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const data = await requestJson("/api/character/config", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: characterNameInput.value,
+        character_model_prompt: characterPromptInput.value,
+        consistency_notes: characterNotesInput.value,
+        style_reference_images: refs,
+      }),
+    });
+    const normalized = data.normalized_prompts || {};
+    showToast(
+      `Character settings saved. Prompt updates: ${normalized.payload_updates || 0}/${normalized.db_updates || 0}`
+    );
+    await Promise.all([refreshCharacterConfig(), refreshScenes()]);
+  } catch (err) {
+    showToast(`Character settings save failed: ${err.message}`, true);
+  }
+});
+
+regenPromptsBtn.addEventListener("click", async () => {
+  try {
+    const refs = characterRefsInput.value
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const data = await requestJson("/api/character/config", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: characterNameInput.value,
+        style_reference_images: refs,
+      }),
+    });
+    const normalized = data.normalized_prompts || {};
+    showToast(`Scene prompts normalized for ${characterNameInput.value || "character"} (${normalized.db_updates || 0})`);
+    await Promise.all([refreshCharacterConfig(), refreshScenes()]);
+  } catch (err) {
+    showToast(`Normalize prompts failed: ${err.message}`, true);
   }
 });
 
@@ -604,6 +691,7 @@ setInterval(async () => {
     await refreshTriggerJobs();
     await refreshRuns();
     await refreshCharacter();
+    await refreshCharacterConfig();
   } catch (err) {
     console.error(err);
   } finally {

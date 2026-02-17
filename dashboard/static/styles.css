@@ -449,6 +449,52 @@ tbody tr:hover {
   gap: 8px;
 }
 
+.character-config-wrap {
+  padding: 12px;
+  border-bottom: 1px solid var(--line-soft);
+  display: grid;
+  gap: 8px;
+}
+
+.character-field {
+  display: grid;
+  gap: 6px;
+}
+
+.character-field > span {
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.character-field input,
+.character-textarea {
+  width: 100%;
+  border-radius: 9px;
+  border: 1px solid rgba(170, 192, 237, 0.3);
+  background: rgba(10, 17, 34, 0.64);
+  color: var(--text);
+  font-size: 12px;
+  padding: 8px;
+}
+
+.character-textarea {
+  min-height: 76px;
+  resize: vertical;
+}
+
+.character-buttons {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.character-prompt-preview {
+  display: grid;
+  gap: 8px;
+}
+
 .character-preview {
   width: 100%;
   border-radius: 11px;
@@ -689,6 +735,10 @@ pre {
   }
 
   .scene-media-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .character-buttons {
     grid-template-columns: 1fr;
   }
 }

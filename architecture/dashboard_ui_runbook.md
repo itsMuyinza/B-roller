@@ -16,6 +16,7 @@ python3 dashboard/app.py
 ## Board Workflow
 1. Generate character model:
    - Click `Generate Character Model`.
+   - Use `Character Consistency` panel to set character name, style references, and prompt lock before generation.
 2. Edit prompts:
    - Update scene row prompts directly in the grid.
    - Click `Save Prompt` on that row.
@@ -40,6 +41,7 @@ python3 dashboard/app.py
 - Payload outputs: `.tmp/phase5_story3/payload_*.json`
 - Full trigger logs: `.tmp/logs/dashboard_trigger_*.log`
 - Script source: `tools/config/script_3_voiceover.md`
+- Character/prompt override source (serverless fallback): `.tmp/dashboard/payload_config_override.json`
 
 ## Failure / Repair Loop
 1. Analyze:
@@ -53,3 +55,8 @@ python3 dashboard/app.py
    - Re-run scene-level dry run from board.
 4. Document:
    - Update `gemini.md` maintenance log and this runbook.
+
+## Serverless Runtime Notes
+- On Vercel serverless, background threads are not durable across requests.
+- Scene image/video jobs run inline in serverless mode so row actions remain reliable.
+- `Run Full Trigger` supports serverless dry-run inline execution; live mode must run via local CLI or GitHub workflow.

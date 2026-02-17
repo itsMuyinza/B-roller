@@ -52,9 +52,23 @@ BOOTSTRAP_LOCK = threading.Lock()
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
+CARTOON_STYLE_GUARDRAIL = (
+    "Visual style lock: stylized western cartoon / editorial 3D-cartoon look. "
+    "Not anime. Not Dragon Ball. Not Goku. No anime aura or spiky anime hair."
+)
+SERVERLESS_ENV_KEYS = ("VERCEL", "NOW_REGION", "AWS_REGION")
+
 
 class DashboardError(RuntimeError):
     """Raised for user-visible failures."""
+
+
+def is_serverless_runtime() -> bool:
+    for key in SERVERLESS_ENV_KEYS:
+        value = os.getenv(key, "")
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
 
 
 def is_simulated_url(url: str) -> bool:
@@ -164,10 +178,187 @@ def get_meta(key: str, default: Optional[str] = None) -> Optional[str]:
     return row["value"] if row else default
 
 
-def load_payload_config() -> Dict[str, Any]:
+def payload_override_path() -> pathlib.Path:
+    return DASH_DIR / "payload_config_override.json"
+
+
+def load_payload_base_config() -> Dict[str, Any]:
     if not PAYLOAD_CONFIG_PATH.exists():
         raise DashboardError(f"Missing payload config: {PAYLOAD_CONFIG_PATH}")
     return json.loads(PAYLOAD_CONFIG_PATH.read_text(encoding="utf-8"))
+
+
+def load_payload_override() -> Dict[str, Any]:
+    path = payload_override_path()
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def deep_merge_dict(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = json.loads(json.dumps(base))
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def load_payload_config() -> Dict[str, Any]:
+    base = load_payload_base_config()
+    override = load_payload_override()
+    if not override:
+        return base
+    return deep_merge_dict(base, override)
+
+
+def save_payload_config(config: Dict[str, Any]) -> str:
+    try:
+        PAYLOAD_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        PAYLOAD_CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+        return str(PAYLOAD_CONFIG_PATH.resolve())
+    except OSError:
+        path = payload_override_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(config, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+        return str(path.resolve())
+
+
+def contains_case_insensitive(text: str, phrase: str) -> bool:
+    if not phrase.strip():
+        return True
+    return re.search(re.escape(phrase.strip()), text, flags=re.IGNORECASE) is not None
+
+
+def ensure_character_in_prompt(prompt: str, character_name: str, kind: str) -> str:
+    base = prompt.strip()
+    if not base:
+        base = "Story beat visual prompt."
+    if character_name.strip() and not contains_case_insensitive(base, character_name):
+        if kind == "motion":
+            base = f"{base} Keep {character_name} clearly visible and on-model throughout the motion."
+        else:
+            base = f"{base} Feature {character_name} as the primary on-screen character."
+    return base
+
+
+def normalize_scene_prompt_with_guardrails(prompt: str, character_name: str, kind: str) -> str:
+    base = ensure_character_in_prompt(prompt, character_name, kind)
+    if not contains_case_insensitive(base, CARTOON_STYLE_GUARDRAIL):
+        base = f"{base} {CARTOON_STYLE_GUARDRAIL}"
+    return base.strip()
+
+
+def enforce_scene_prompts_with_character_name(character_name: str, persist_payload: bool = True) -> Dict[str, int]:
+    character_name = character_name.strip()
+    config = load_payload_config()
+    scenes = config.get("scenes", [])
+    if not isinstance(scenes, list):
+        return {"payload_updates": 0, "db_updates": 0}
+
+    payload_updates = 0
+    db_updates = 0
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        scene_id = str(scene.get("scene_id", "")).strip()
+        image_before = str(scene.get("image_prompt", "")).strip()
+        motion_before = str(scene.get("motion_prompt", "")).strip()
+        image_after = normalize_scene_prompt_with_guardrails(image_before, character_name, "image")
+        motion_after = normalize_scene_prompt_with_guardrails(motion_before, character_name, "motion")
+
+        if image_after != image_before or motion_after != motion_before:
+            scene["image_prompt"] = image_after
+            scene["motion_prompt"] = motion_after
+            payload_updates += 1
+
+        if scene_id:
+            row = get_scene(scene_id)
+            if row is not None and (row.get("image_prompt") != image_after or row.get("motion_prompt") != motion_after):
+                update_scene_fields(scene_id, {"image_prompt": image_after, "motion_prompt": motion_after})
+                db_updates += 1
+
+    if payload_updates > 0 and persist_payload:
+        save_payload_config(config)
+    return {"payload_updates": payload_updates, "db_updates": db_updates}
+
+
+def get_character_config() -> Dict[str, Any]:
+    config = load_payload_config()
+    character = config.get("character", {}) if isinstance(config.get("character"), dict) else {}
+    refs = config.get("style_reference_images", [])
+    if not isinstance(refs, list):
+        refs = []
+    name = str(character.get("name", "")).strip()
+    model_prompt = str(character.get("character_model_prompt", "")).strip()
+    notes = str(character.get("consistency_notes", "")).strip()
+    effective_prompt = build_character_prompt(name=name, model_prompt=model_prompt, consistency_notes=notes)
+    return {
+        "name": name,
+        "character_model_prompt": model_prompt,
+        "consistency_notes": notes,
+        "style_reference_images": [str(item).strip() for item in refs if str(item).strip()],
+        "style_guardrail": CARTOON_STYLE_GUARDRAIL,
+        "effective_prompt": effective_prompt,
+    }
+
+
+def build_character_prompt(*, name: str, model_prompt: str, consistency_notes: str) -> str:
+    parts: List[str] = []
+    raw_prompt = model_prompt.strip()
+    if raw_prompt:
+        parts.append(raw_prompt)
+    if name.strip() and not contains_case_insensitive(raw_prompt, name):
+        parts.append(f"Character name: {name}.")
+    parts.append(CARTOON_STYLE_GUARDRAIL)
+    if consistency_notes.strip():
+        parts.append(f"Consistency requirements: {consistency_notes.strip()}")
+    return " ".join(parts).strip()
+
+
+def parse_style_reference_images(raw: Any) -> List[str]:
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    if isinstance(raw, str):
+        lines = [line.strip() for line in raw.replace(",", "\n").splitlines()]
+        return [line for line in lines if line]
+    return []
+
+
+def update_character_config(payload: Dict[str, Any]) -> Dict[str, Any]:
+    config = load_payload_config()
+    character = config.get("character", {}) if isinstance(config.get("character"), dict) else {}
+
+    if "name" in payload:
+        character["name"] = str(payload.get("name", "")).strip()
+    if "character_model_prompt" in payload:
+        character["character_model_prompt"] = str(payload.get("character_model_prompt", "")).strip()
+    if "consistency_notes" in payload:
+        character["consistency_notes"] = str(payload.get("consistency_notes", "")).strip()
+
+    config["character"] = character
+
+    if "style_reference_images" in payload:
+        refs = parse_style_reference_images(payload.get("style_reference_images"))
+        config["style_reference_images"] = refs
+
+    saved_path = save_payload_config(config)
+    sync_scenes_from_payload()
+    character_name = str(character.get("name", "")).strip()
+    normalized = enforce_scene_prompts_with_character_name(character_name, persist_payload=True) if character_name else {
+        "payload_updates": 0,
+        "db_updates": 0,
+    }
+    return {
+        "saved_path": saved_path,
+        "character_config": get_character_config(),
+        "normalized_prompts": normalized,
+    }
 
 
 def get_generation_config() -> Dict[str, Any]:
@@ -298,6 +489,11 @@ def bootstrap_once() -> None:
         ensure_dirs()
         init_db()
         sync_scenes_from_payload()
+        cfg = load_payload_config()
+        character = cfg.get("character", {}) if isinstance(cfg.get("character"), dict) else {}
+        character_name = str(character.get("name", "")).strip()
+        if character_name:
+            enforce_scene_prompts_with_character_name(character_name, persist_payload=False)
         BOOTSTRAPPED = True
 
 
@@ -436,6 +632,19 @@ def list_scene_jobs(limit: int = 120) -> List[Dict[str, Any]]:
             (limit,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def get_scene_job(job_id: str) -> Optional[Dict[str, Any]]:
+    with db_conn() as conn:
+        row = conn.execute(
+            """
+            select id, scene_id, stage, mode, status, requested_at, finished_at, task_id, result_url, error
+            from scene_jobs
+            where id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+    return dict(row) if row is not None else None
 
 
 def insert_trigger_job(record: Dict[str, Any]) -> None:
@@ -867,7 +1076,10 @@ def generate_character_model(dry_run: bool) -> Dict[str, str]:
     config = load_payload_config()
     generation = get_generation_config()
     character = config.get("character", {}) if isinstance(config.get("character"), dict) else {}
-    prompt = str(character.get("character_model_prompt", "")).strip()
+    name = str(character.get("name", "")).strip()
+    model_prompt = str(character.get("character_model_prompt", "")).strip()
+    consistency_notes = str(character.get("consistency_notes", "")).strip()
+    prompt = build_character_prompt(name=name, model_prompt=model_prompt, consistency_notes=consistency_notes)
     if not prompt:
         raise DashboardError("Character model prompt is missing in payload config.")
 
@@ -906,6 +1118,9 @@ def generate_scene_image(scene_id: str, dry_run: bool) -> Dict[str, str]:
         raise DashboardError(f"Scene not found: {scene_id}")
 
     generation = get_generation_config()
+    config = load_payload_config()
+    character = config.get("character", {}) if isinstance(config.get("character"), dict) else {}
+    character_name = str(character.get("name", "")).strip()
     client = None if dry_run else get_wavespeed_client()
 
     character = get_character_state()
@@ -932,8 +1147,14 @@ def generate_scene_image(scene_id: str, dry_run: bool) -> Dict[str, str]:
         image_url = f"https://dry-run.local/scenes/{scene_id}/{task_id}.png"
         return {"task_id": task_id, "url": image_url}
 
+    effective_prompt = normalize_scene_prompt_with_guardrails(
+        str(scene.get("image_prompt", "")),
+        character_name=character_name,
+        kind="image",
+    )
+
     payload = {
-        "prompt": scene["image_prompt"],
+        "prompt": effective_prompt,
         "images": dedup_refs,
         "resolution": generation["image_resolution"],
         "output_format": generation["image_output_format"],
@@ -954,15 +1175,23 @@ def generate_scene_video(scene_id: str, dry_run: bool) -> Dict[str, str]:
         raise DashboardError("Scene image missing. Generate image first.")
 
     generation = get_generation_config()
+    config = load_payload_config()
+    character = config.get("character", {}) if isinstance(config.get("character"), dict) else {}
+    character_name = str(character.get("name", "")).strip()
     if dry_run:
         task_id = f"dry-video-{scene_id}-{uuid.uuid4().hex[:8]}"
         video_url = f"https://dry-run.local/scenes/{scene_id}/{task_id}.mp4"
         return {"task_id": task_id, "url": video_url}
 
     client = get_wavespeed_client()
+    effective_prompt = normalize_scene_prompt_with_guardrails(
+        str(scene.get("motion_prompt", "")),
+        character_name=character_name,
+        kind="motion",
+    )
     payload = {
         "image": scene["image_url"],
-        "prompt": scene["motion_prompt"],
+        "prompt": effective_prompt,
         "duration": generation["video_duration_seconds"],
         "resolution": generation["video_resolution"],
         "movement_amplitude": generation["movement_amplitude"],
@@ -1071,6 +1300,13 @@ def start_scene_job(scene_id: str, stage: str, dry_run: bool) -> Dict[str, Any]:
     else:
         update_scene_fields(scene_id, {"video_status": "running", "last_error": None})
 
+    # Serverless runtimes are request-scoped, so background threads do not persist reliably.
+    # Execute inline to keep button behavior deterministic on Vercel.
+    if is_serverless_runtime():
+        run_scene_job(job_id, scene_id, stage, dry_run)
+        latest = get_scene_job(job_id)
+        return latest or record
+
     thread = threading.Thread(target=run_scene_job, args=(job_id, scene_id, stage, dry_run), daemon=True)
     with ACTIVE_SCENE_LOCK:
         ACTIVE_SCENE_JOBS[key] = {"thread": thread, "job_id": job_id}
@@ -1081,6 +1317,7 @@ def start_scene_job(scene_id: str, stage: str, dry_run: bool) -> Dict[str, Any]:
 def start_trigger_job(dry_run: bool, provider: str) -> Dict[str, Any]:
     reconcile_trigger_jobs()
     job_id = f"trigger-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:6]}"
+    requested_at = utc_now()
     mode = "dry_run" if dry_run else "live"
     log_path = LOG_DIR / f"dashboard_trigger_{job_id}.log"
 
@@ -1096,6 +1333,67 @@ def start_trigger_job(dry_run: bool, provider: str) -> Dict[str, Any]:
     ]
     if dry_run:
         cmd.append("--dry-run")
+
+    if is_serverless_runtime():
+        if not dry_run:
+            raise DashboardError(
+                "Run Full Trigger (live) is disabled on Vercel serverless. "
+                "Use dry run here, or run live from local CLI/GitHub workflow."
+            )
+
+        insert_trigger_job(
+            {
+                "id": job_id,
+                "requested_at": requested_at,
+                "mode": mode,
+                "provider": provider,
+                "status": "running",
+                "pid": None,
+                "log_path": str(log_path.resolve()),
+            }
+        )
+        try:
+            proc = subprocess.run(  # noqa: S603
+                cmd,
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                env=os.environ.copy(),
+                timeout=180,
+                check=False,
+            )
+            combined = ""
+            if proc.stdout:
+                combined += proc.stdout
+            if proc.stderr:
+                combined += "\n" + proc.stderr
+            log_path.write_text(combined, encoding="utf-8")
+            status = "completed" if proc.returncode == 0 else "failed"
+            update_trigger_job(job_id, status=status, exit_code=proc.returncode)
+            record = {
+                "id": job_id,
+                "requested_at": requested_at,
+                "mode": mode,
+                "provider": provider,
+                "status": status,
+                "pid": None,
+                "log_path": str(log_path.resolve()),
+            }
+            latest = next((item for item in list_trigger_jobs(limit=20) if item["id"] == job_id), None)
+            return latest or record
+        except subprocess.TimeoutExpired:
+            log_path.write_text("Trigger timed out in serverless runtime.", encoding="utf-8")
+            update_trigger_job(job_id, status="failed", exit_code=124)
+            latest = next((item for item in list_trigger_jobs(limit=20) if item["id"] == job_id), None)
+            return latest or {
+                "id": job_id,
+                "requested_at": requested_at,
+                "mode": mode,
+                "provider": provider,
+                "status": "failed",
+                "pid": None,
+                "log_path": str(log_path.resolve()),
+            }
 
     env = os.environ.copy()
     log_handle = log_path.open("a", encoding="utf-8")
@@ -1115,7 +1413,7 @@ def start_trigger_job(dry_run: bool, provider: str) -> Dict[str, Any]:
 
     job_record = {
         "id": job_id,
-        "requested_at": utc_now(),
+        "requested_at": requested_at,
         "mode": mode,
         "provider": provider,
         "status": "running",
@@ -1182,10 +1480,20 @@ def api_update_scene(scene_id: str) -> Any:
     if scene is None:
         return jsonify({"error": "scene not found"}), 404
 
+    character_name = str(get_character_config().get("name", "")).strip()
     updates: Dict[str, Any] = {}
     for field in ("narration", "image_prompt", "motion_prompt"):
         if field in payload and isinstance(payload[field], str):
             updates[field] = payload[field].strip()
+
+    if "image_prompt" in updates:
+        updates["image_prompt"] = normalize_scene_prompt_with_guardrails(
+            updates["image_prompt"], character_name, "image"
+        )
+    if "motion_prompt" in updates:
+        updates["motion_prompt"] = normalize_scene_prompt_with_guardrails(
+            updates["motion_prompt"], character_name, "motion"
+        )
 
     if "reference_images" in payload and isinstance(payload["reference_images"], list):
         updates["reference_images"] = [str(item).strip() for item in payload["reference_images"] if str(item).strip()]
@@ -1303,6 +1611,25 @@ def api_scene_jobs() -> Any:
 def api_character() -> Any:
     bootstrap_once()
     return jsonify(get_character_state())
+
+
+@app.get("/api/character/config")
+def api_character_config_get() -> Any:
+    bootstrap_once()
+    return jsonify(get_character_config())
+
+
+@app.patch("/api/character/config")
+def api_character_config_patch() -> Any:
+    bootstrap_once()
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Invalid JSON body"}), 400
+    try:
+        result = update_character_config(payload)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(result)
 
 
 @app.post("/api/character/generate")

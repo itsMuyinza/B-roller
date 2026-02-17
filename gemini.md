@@ -198,6 +198,15 @@
   - Added polling guard to avoid overlapping refresh calls and hidden-tab churn.
   - Added serverless-safe dashboard bootstrap (`DASHBOARD_DATA_ROOT`) and Vercel entrypoint (`api/index.py` + `vercel.json`).
   - Added script-save fallback path (`.tmp/dashboard/script_override.md`) when source script path is read-only.
+  - Added character configuration controls in dashboard UI:
+    - Editable character name, character-model prompt, consistency notes, and style-reference URLs.
+    - Effective prompt preview with explicit style guardrail.
+  - Added prompt-guardrail enforcement:
+    - Every scene image/motion prompt is normalized to include the story character name.
+    - Added anti-anime style lock (`not anime`, `not Dragon Ball`, `not Goku`) to character and scene generation prompts.
+  - Added serverless runtime compatibility fixes:
+    - Scene jobs run inline on serverless to avoid background-thread loss.
+    - Full trigger on serverless now supports deterministic dry-run inline execution and returns clear message for live mode.
   - Fixed simulated dry-run media preview handling to prevent broken-media rendering.
   - Validation run (dry): `python3 tools/run_phase5_trigger.py --dry-run` succeeded, scene_count=8.
   - Validation run (live transfer): cloud upload succeeded to Cloudinary fallback.
