@@ -23,7 +23,12 @@ from flask import Flask, Response, jsonify, render_template, request, stream_wit
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-TMP_DIR = ROOT / ".tmp"
+DATA_ROOT_RAW = os.environ.get("DASHBOARD_DATA_ROOT", str(ROOT))
+DATA_ROOT = pathlib.Path(DATA_ROOT_RAW).expanduser()
+if not DATA_ROOT.is_absolute():
+    DATA_ROOT = (ROOT / DATA_ROOT).resolve()
+
+TMP_DIR = DATA_ROOT / ".tmp"
 RUN_DIR = TMP_DIR / "phase5_story3"
 LOG_DIR = TMP_DIR / "logs"
 DASH_DIR = TMP_DIR / "dashboard"
@@ -42,6 +47,8 @@ ACTIVE_TRIGGER_LOCK = threading.Lock()
 ACTIVE_SCENE_JOBS: Dict[Tuple[str, str], Dict[str, Any]] = {}
 ACTIVE_SCENE_LOCK = threading.Lock()
 REF_CACHE: Dict[str, str] = {}
+BOOTSTRAPPED = False
+BOOTSTRAP_LOCK = threading.Lock()
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
@@ -197,6 +204,13 @@ def discover_script_path() -> pathlib.Path:
 
 
 def read_script_panel() -> Dict[str, Any]:
+    override_path = DASH_DIR / "script_override.md"
+    if override_path.exists():
+        return {
+            "script_path": str(override_path.resolve()),
+            "script_text": override_path.read_text(encoding="utf-8"),
+        }
+
     script_path = discover_script_path()
     text = script_path.read_text(encoding="utf-8") if script_path.exists() else ""
     return {
@@ -207,9 +221,18 @@ def read_script_panel() -> Dict[str, Any]:
 
 def write_script_text(new_text: str) -> Dict[str, Any]:
     script_path = discover_script_path()
-    script_path.parent.mkdir(parents=True, exist_ok=True)
-    script_path.write_text(new_text, encoding="utf-8")
-    return read_script_panel()
+    try:
+        script_path.parent.mkdir(parents=True, exist_ok=True)
+        script_path.write_text(new_text, encoding="utf-8")
+        return read_script_panel()
+    except OSError:
+        override_path = DASH_DIR / "script_override.md"
+        override_path.parent.mkdir(parents=True, exist_ok=True)
+        override_path.write_text(new_text, encoding="utf-8")
+        return {
+            "script_path": str(override_path.resolve()),
+            "script_text": new_text,
+        }
 
 
 def sync_scenes_from_payload() -> None:
@@ -250,6 +273,32 @@ def sync_scenes_from_payload() -> None:
                 )
             else:
                 conn.execute("update scenes set position = ? where scene_id = ?", (index, scene_id))
+
+
+def bootstrap_once() -> None:
+    global BOOTSTRAPPED, DATA_ROOT, TMP_DIR, RUN_DIR, LOG_DIR, DASH_DIR, DB_PATH
+    if BOOTSTRAPPED:
+        return
+    with BOOTSTRAP_LOCK:
+        if BOOTSTRAPPED:
+            return
+        load_env_file(ROOT / ".env")
+        data_root_raw = os.environ.get("DASHBOARD_DATA_ROOT", str(ROOT))
+        data_root = pathlib.Path(data_root_raw).expanduser()
+        if not data_root.is_absolute():
+            data_root = (ROOT / data_root).resolve()
+
+        DATA_ROOT = data_root
+        TMP_DIR = DATA_ROOT / ".tmp"
+        RUN_DIR = TMP_DIR / "phase5_story3"
+        LOG_DIR = TMP_DIR / "logs"
+        DASH_DIR = TMP_DIR / "dashboard"
+        DB_PATH = DASH_DIR / "dashboard.db"
+
+        ensure_dirs()
+        init_db()
+        sync_scenes_from_payload()
+        BOOTSTRAPPED = True
 
 
 def parse_ref_images(raw: str) -> List[str]:
@@ -1079,16 +1128,19 @@ def start_trigger_job(dry_run: bool, provider: str) -> Dict[str, Any]:
 
 @app.get("/")
 def index() -> str:
+    bootstrap_once()
     return render_template("index.html")
 
 
 @app.get("/favicon.ico")
 def favicon() -> Any:
+    bootstrap_once()
     return Response(status=204)
 
 
 @app.get("/api/overview")
 def api_overview() -> Any:
+    bootstrap_once()
     reconcile_trigger_jobs()
     return jsonify(
         {
@@ -1118,11 +1170,13 @@ def api_overview() -> Any:
 
 @app.get("/api/scenes")
 def api_scenes() -> Any:
+    bootstrap_once()
     return jsonify({"scenes": list_scenes()})
 
 
 @app.patch("/api/scenes/<scene_id>")
 def api_update_scene(scene_id: str) -> Any:
+    bootstrap_once()
     payload = request.get_json(silent=True) or {}
     scene = get_scene(scene_id)
     if scene is None:
@@ -1163,6 +1217,7 @@ def api_update_scene(scene_id: str) -> Any:
 
 @app.post("/api/scenes/<scene_id>/generate-image")
 def api_generate_scene_image(scene_id: str) -> Any:
+    bootstrap_once()
     payload = request.get_json(silent=True) or {}
     dry_run = bool(payload.get("dry_run", False))
     try:
@@ -1174,6 +1229,7 @@ def api_generate_scene_image(scene_id: str) -> Any:
 
 @app.post("/api/scenes/<scene_id>/generate-video")
 def api_generate_scene_video(scene_id: str) -> Any:
+    bootstrap_once()
     payload = request.get_json(silent=True) or {}
     dry_run = bool(payload.get("dry_run", False))
     try:
@@ -1185,6 +1241,7 @@ def api_generate_scene_video(scene_id: str) -> Any:
 
 @app.post("/api/scenes/generate-images")
 def api_generate_images_batch() -> Any:
+    bootstrap_once()
     payload = request.get_json(silent=True) or {}
     dry_run = bool(payload.get("dry_run", False))
     only_missing = bool(payload.get("only_missing", True))
@@ -1210,6 +1267,7 @@ def api_generate_images_batch() -> Any:
 
 @app.post("/api/scenes/generate-videos")
 def api_generate_videos_batch() -> Any:
+    bootstrap_once()
     payload = request.get_json(silent=True) or {}
     dry_run = bool(payload.get("dry_run", False))
     only_missing = bool(payload.get("only_missing", True))
@@ -1237,16 +1295,19 @@ def api_generate_videos_batch() -> Any:
 
 @app.get("/api/scene-jobs")
 def api_scene_jobs() -> Any:
+    bootstrap_once()
     return jsonify({"jobs": list_scene_jobs()})
 
 
 @app.get("/api/character")
 def api_character() -> Any:
+    bootstrap_once()
     return jsonify(get_character_state())
 
 
 @app.post("/api/character/generate")
 def api_character_generate() -> Any:
+    bootstrap_once()
     payload = request.get_json(silent=True) or {}
     dry_run = bool(payload.get("dry_run", False))
     try:
@@ -1258,11 +1319,13 @@ def api_character_generate() -> Any:
 
 @app.get("/api/script")
 def api_script_get() -> Any:
+    bootstrap_once()
     return jsonify(read_script_panel())
 
 
 @app.patch("/api/script")
 def api_script_patch() -> Any:
+    bootstrap_once()
     payload = request.get_json(silent=True) or {}
     text = payload.get("script_text")
     if not isinstance(text, str):
@@ -1272,12 +1335,14 @@ def api_script_patch() -> Any:
 
 @app.get("/api/runs")
 def api_runs() -> Any:
+    bootstrap_once()
     reconcile_trigger_jobs()
     return jsonify({"runs": list_runs()})
 
 
 @app.get("/api/runs/<run_id>")
 def api_run_detail(run_id: str) -> Any:
+    bootstrap_once()
     payload = read_payload_by_run_id(run_id)
     if payload is None:
         return jsonify({"error": "run not found"}), 404
@@ -1286,6 +1351,7 @@ def api_run_detail(run_id: str) -> Any:
 
 @app.get("/api/runs/<run_id>/download")
 def api_run_download(run_id: str) -> Any:
+    bootstrap_once()
     payload = read_payload_by_run_id(run_id)
     if payload is None:
         return jsonify({"error": "run not found"}), 404
@@ -1297,6 +1363,7 @@ def api_run_download(run_id: str) -> Any:
 
 @app.get("/api/runs/latest/download")
 def api_latest_run_download() -> Any:
+    bootstrap_once()
     path = latest_payload_path()
     if path is None or not path.exists():
         return jsonify({"error": "No payload file available"}), 404
@@ -1305,6 +1372,7 @@ def api_latest_run_download() -> Any:
 
 @app.get("/api/scenes/<scene_id>/download/<asset_kind>")
 def api_scene_asset_download(scene_id: str, asset_kind: str) -> Any:
+    bootstrap_once()
     scene = get_scene(scene_id)
     if scene is None:
         return jsonify({"error": "scene not found"}), 404
@@ -1332,12 +1400,14 @@ def api_scene_asset_download(scene_id: str, asset_kind: str) -> Any:
 
 @app.get("/api/jobs")
 def api_trigger_jobs() -> Any:
+    bootstrap_once()
     reconcile_trigger_jobs()
     return jsonify({"jobs": list_trigger_jobs()})
 
 
 @app.get("/api/jobs/<job_id>/log")
 def api_trigger_job_log(job_id: str) -> Any:
+    bootstrap_once()
     reconcile_trigger_jobs()
     jobs = {job["id"]: job for job in list_trigger_jobs(limit=200)}
     job = jobs.get(job_id)
@@ -1349,6 +1419,7 @@ def api_trigger_job_log(job_id: str) -> Any:
 
 @app.post("/api/trigger")
 def api_trigger() -> Any:
+    bootstrap_once()
     payload = request.get_json(silent=True) or {}
     dry_run = bool(payload.get("dry_run", False))
     provider = str(payload.get("provider", "auto")).strip().lower()
@@ -1362,9 +1433,7 @@ def api_trigger() -> Any:
 
 
 def main() -> None:
-    load_env_file(ROOT / ".env")
-    init_db()
-    sync_scenes_from_payload()
+    bootstrap_once()
     app.run(host="127.0.0.1", port=5055, debug=False)
 
 

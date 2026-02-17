@@ -193,7 +193,11 @@
     - Per-scene image/video download endpoints.
     - Latest payload JSON download button.
     - Run-specific payload download from Recent Runs.
-  - Improved dashboard UI polish with glassmorphic visual system and sticky actions column.
+  - Improved dashboard UI polish with glassmorphic visual system.
+  - Added responsive mobile scene-card mode (full edit + trigger + download actions without horizontal clipping).
+  - Added polling guard to avoid overlapping refresh calls and hidden-tab churn.
+  - Added serverless-safe dashboard bootstrap (`DASHBOARD_DATA_ROOT`) and Vercel entrypoint (`api/index.py` + `vercel.json`).
+  - Added script-save fallback path (`.tmp/dashboard/script_override.md`) when source script path is read-only.
   - Fixed simulated dry-run media preview handling to prevent broken-media rendering.
   - Validation run (dry): `python3 tools/run_phase5_trigger.py --dry-run` succeeded, scene_count=8.
   - Validation run (live transfer): cloud upload succeeded to Cloudinary fallback.

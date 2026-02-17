@@ -9,6 +9,7 @@ const runFullTriggerBtn = document.getElementById("runFullTriggerBtn");
 const downloadLatestPayloadBtn = document.getElementById("downloadLatestPayloadBtn");
 
 const scenesBody = document.getElementById("scenesBody");
+const scenesCards = document.getElementById("scenesCards");
 const sceneJobsBody = document.getElementById("sceneJobsBody");
 const triggerJobsBody = document.getElementById("triggerJobsBody");
 const runsBody = document.getElementById("runsBody");
@@ -24,6 +25,7 @@ const triggerLog = document.getElementById("triggerLog");
 const toast = document.getElementById("toast");
 
 let selectedTriggerJobId = null;
+let pollInFlight = false;
 
 function isDryRun() {
   return modeSelect.value === "dry";
@@ -159,9 +161,104 @@ function scenePreview(url, type) {
   return `<video class="preview" src="${esc(url)}" controls muted preload="none"></video>`;
 }
 
+function sceneActionsMarkup(canDownloadImage, canDownloadVideo) {
+  return `
+    <div class="actions-cell">
+      <button class="btn btn-sm btn-muted" data-action="save">Save Prompt</button>
+      <button class="btn btn-sm btn-primary" data-action="image">Generate Image</button>
+      <button class="btn btn-sm btn-primary" data-action="video">Generate Video</button>
+      <button class="btn btn-sm btn-glass" data-action="download-image" ${canDownloadImage ? "" : "disabled"}>Download Image</button>
+      <button class="btn btn-sm btn-glass" data-action="download-video" ${canDownloadVideo ? "" : "disabled"}>Download Video</button>
+    </div>
+  `;
+}
+
+function attachSceneEntryHandlers(entries) {
+  entries.forEach((entry) => {
+    const sceneId = entry.getAttribute("data-scene-id");
+    const saveBtn = entry.querySelector('[data-action="save"]');
+    const imageBtn = entry.querySelector('[data-action="image"]');
+    const videoBtn = entry.querySelector('[data-action="video"]');
+    const downloadImageBtn = entry.querySelector('[data-action="download-image"]');
+    const downloadVideoBtn = entry.querySelector('[data-action="download-video"]');
+
+    saveBtn?.addEventListener("click", async () => {
+      const narration = entry.querySelector('[data-field="narration"]').value;
+      const imagePrompt = entry.querySelector('[data-field="image_prompt"]').value;
+      const motionPrompt = entry.querySelector('[data-field="motion_prompt"]').value;
+      try {
+        await requestJson(`/api/scenes/${encodeURIComponent(sceneId)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            narration,
+            image_prompt: imagePrompt,
+            motion_prompt: motionPrompt,
+          }),
+        });
+        showToast(`Saved ${sceneId}`);
+        await refreshScenes();
+      } catch (err) {
+        showToast(`Save failed (${sceneId}): ${err.message}`, true);
+      }
+    });
+
+    imageBtn?.addEventListener("click", async () => {
+      try {
+        await requestJson(`/api/scenes/${encodeURIComponent(sceneId)}/generate-image`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dry_run: isDryRun() }),
+        });
+        showToast(`Image job started for ${sceneId}`);
+        await Promise.all([refreshSceneJobs(), refreshScenes(), refreshCharacter()]);
+      } catch (err) {
+        showToast(`Image trigger failed (${sceneId}): ${err.message}`, true);
+      }
+    });
+
+    videoBtn?.addEventListener("click", async () => {
+      try {
+        await requestJson(`/api/scenes/${encodeURIComponent(sceneId)}/generate-video`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dry_run: isDryRun() }),
+        });
+        showToast(`Video job started for ${sceneId}`);
+        await Promise.all([refreshSceneJobs(), refreshScenes()]);
+      } catch (err) {
+        showToast(`Video trigger failed (${sceneId}): ${err.message}`, true);
+      }
+    });
+
+    downloadImageBtn?.addEventListener("click", async () => {
+      if (downloadImageBtn.hasAttribute("disabled")) return;
+      try {
+        await downloadFromApi(`/api/scenes/${encodeURIComponent(sceneId)}/download/image`, `${sceneId}_image`);
+        showToast(`Downloaded image for ${sceneId}`);
+      } catch (err) {
+        showToast(`Image download failed (${sceneId}): ${err.message}`, true);
+      }
+    });
+
+    downloadVideoBtn?.addEventListener("click", async () => {
+      if (downloadVideoBtn.hasAttribute("disabled")) return;
+      try {
+        await downloadFromApi(`/api/scenes/${encodeURIComponent(sceneId)}/download/video`, `${sceneId}_video`);
+        showToast(`Downloaded video for ${sceneId}`);
+      } catch (err) {
+        showToast(`Video download failed (${sceneId}): ${err.message}`, true);
+      }
+    });
+  });
+}
+
 function renderScenes(items) {
   if (!items.length) {
     scenesBody.innerHTML = `<tr><td colspan="8">No scenes found.</td></tr>`;
+    if (scenesCards) {
+      scenesCards.innerHTML = `<div class="scenes-empty">No scenes found.</div>`;
+    }
     return;
   }
 
@@ -195,91 +292,57 @@ function renderScenes(items) {
           ${scenePreview(scene.video_url, "video")}
         </td>
         <td>
-          <div class="actions-cell">
-            <button class="btn btn-sm btn-muted" data-action="save">Save Prompt</button>
-            <button class="btn btn-sm btn-primary" data-action="image">Generate Image</button>
-            <button class="btn btn-sm btn-primary" data-action="video">Generate Video</button>
-            <button class="btn btn-sm btn-glass" data-action="download-image" ${canDownloadImage ? "" : "disabled"}>Download Image</button>
-            <button class="btn btn-sm btn-glass" data-action="download-video" ${canDownloadVideo ? "" : "disabled"}>Download Video</button>
-          </div>
+          ${sceneActionsMarkup(canDownloadImage, canDownloadVideo)}
         </td>
       </tr>
     `;
     })
     .join("");
 
-  scenesBody.querySelectorAll("tr[data-scene-id]").forEach((row) => {
-    const sceneId = row.getAttribute("data-scene-id");
+  if (scenesCards) {
+    scenesCards.innerHTML = items
+      .map((scene) => {
+        const canDownloadImage = Boolean(scene.image_url) && !isSimulatedUrl(scene.image_url);
+        const canDownloadVideo = Boolean(scene.video_url) && !isSimulatedUrl(scene.video_url);
+        return `
+        <article class="scene-card" data-scene-id="${esc(scene.scene_id)}">
+          <div class="scene-card-head">
+            <div class="scene-card-title">#${esc(scene.position)} ${esc(scene.scene_id)}</div>
+            <div class="scene-sub">Updated: ${esc(scene.updated_at || "")}</div>
+            ${scene.last_error ? `<div class="scene-sub scene-error">${esc(scene.last_error)}</div>` : ""}
+          </div>
+          <label class="scene-field">
+            <span>Narration</span>
+            <textarea class="cell-editor" data-field="narration">${esc(scene.narration || "")}</textarea>
+          </label>
+          <label class="scene-field">
+            <span>Image Prompt</span>
+            <textarea class="cell-editor" data-field="image_prompt">${esc(scene.image_prompt || "")}</textarea>
+          </label>
+          <label class="scene-field">
+            <span>Motion Prompt</span>
+            <textarea class="cell-editor" data-field="motion_prompt">${esc(scene.motion_prompt || "")}</textarea>
+          </label>
+          <div class="scene-media-grid">
+            <div class="scene-media-box">
+              <div class="scene-media-head"><span>Image</span>${statusChip(scene.image_status || "pending")}</div>
+              ${scenePreview(scene.image_url, "image")}
+            </div>
+            <div class="scene-media-box">
+              <div class="scene-media-head"><span>Video</span>${statusChip(scene.video_status || "pending")}</div>
+              ${scenePreview(scene.video_url, "video")}
+            </div>
+          </div>
+          ${sceneActionsMarkup(canDownloadImage, canDownloadVideo)}
+        </article>
+      `;
+      })
+      .join("");
+  }
 
-    row.querySelector('[data-action="save"]').addEventListener("click", async () => {
-      const narration = row.querySelector('[data-field="narration"]').value;
-      const imagePrompt = row.querySelector('[data-field="image_prompt"]').value;
-      const motionPrompt = row.querySelector('[data-field="motion_prompt"]').value;
-      try {
-        await requestJson(`/api/scenes/${encodeURIComponent(sceneId)}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            narration,
-            image_prompt: imagePrompt,
-            motion_prompt: motionPrompt,
-          }),
-        });
-        showToast(`Saved ${sceneId}`);
-        await refreshScenes();
-      } catch (err) {
-        showToast(`Save failed (${sceneId}): ${err.message}`, true);
-      }
-    });
-
-    row.querySelector('[data-action="image"]').addEventListener("click", async () => {
-      try {
-        await requestJson(`/api/scenes/${encodeURIComponent(sceneId)}/generate-image`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ dry_run: isDryRun() }),
-        });
-        showToast(`Image job started for ${sceneId}`);
-        await Promise.all([refreshSceneJobs(), refreshScenes(), refreshCharacter()]);
-      } catch (err) {
-        showToast(`Image trigger failed (${sceneId}): ${err.message}`, true);
-      }
-    });
-
-    row.querySelector('[data-action="video"]').addEventListener("click", async () => {
-      try {
-        await requestJson(`/api/scenes/${encodeURIComponent(sceneId)}/generate-video`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ dry_run: isDryRun() }),
-        });
-        showToast(`Video job started for ${sceneId}`);
-        await Promise.all([refreshSceneJobs(), refreshScenes()]);
-      } catch (err) {
-        showToast(`Video trigger failed (${sceneId}): ${err.message}`, true);
-      }
-    });
-
-    row.querySelector('[data-action="download-image"]').addEventListener("click", async () => {
-      if (row.querySelector('[data-action="download-image"]').hasAttribute("disabled")) return;
-      try {
-        await downloadFromApi(`/api/scenes/${encodeURIComponent(sceneId)}/download/image`, `${sceneId}_image`);
-        showToast(`Downloaded image for ${sceneId}`);
-      } catch (err) {
-        showToast(`Image download failed (${sceneId}): ${err.message}`, true);
-      }
-    });
-
-    row.querySelector('[data-action="download-video"]').addEventListener("click", async () => {
-      if (row.querySelector('[data-action="download-video"]').hasAttribute("disabled")) return;
-      try {
-        await downloadFromApi(`/api/scenes/${encodeURIComponent(sceneId)}/download/video`, `${sceneId}_video`);
-        showToast(`Downloaded video for ${sceneId}`);
-      } catch (err) {
-        showToast(`Video download failed (${sceneId}): ${err.message}`, true);
-      }
-    });
-  });
+  const tableEntries = Array.from(scenesBody.querySelectorAll("tr[data-scene-id]"));
+  const cardEntries = scenesCards ? Array.from(scenesCards.querySelectorAll("article[data-scene-id]")) : [];
+  attachSceneEntryHandlers([...tableEntries, ...cardEntries]);
 }
 
 function renderSceneJobs(data) {
@@ -529,13 +592,21 @@ saveScriptBtn.addEventListener("click", async () => {
 
 refreshAll();
 setInterval(async () => {
+  if (document.hidden || pollInFlight) return;
+  pollInFlight = true;
   const active = document.activeElement;
   const editing = active && active.tagName === "TEXTAREA" && active.classList.contains("cell-editor");
-  if (!editing) {
-    await refreshScenes();
+  try {
+    if (!editing) {
+      await refreshScenes();
+    }
+    await refreshSceneJobs();
+    await refreshTriggerJobs();
+    await refreshRuns();
+    await refreshCharacter();
+  } catch (err) {
+    console.error(err);
+  } finally {
+    pollInFlight = false;
   }
-  await refreshSceneJobs();
-  await refreshTriggerJobs();
-  await refreshRuns();
-  await refreshCharacter();
 }, 8000);
