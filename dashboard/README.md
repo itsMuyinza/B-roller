@@ -1,13 +1,16 @@
-# APRT Trigger Dashboard
+# APRT B-Roll Dashboard
 
-Local Airtable-style dashboard for Phase 5 trigger operations.
+Local Airtable-style board for scene-level prompt editing and media triggers.
 
-## Features
-- Runs table with payload status and cloud destination.
-- Trigger launcher (`dry` / `live`, provider selection).
-- Trigger queue with job status and log viewer.
-- Full Script 3 panel with scrollable text.
-- Trigger metadata panel (GitHub cron, local cron, webhook paths).
+## What it does
+- Shows every Script 3 scene as a grid row.
+- Lets you edit `narration`, `image_prompt`, and `motion_prompt` inline.
+- Generates character model first for visual consistency.
+- Triggers image generation per scene.
+- Triggers video generation per scene (requires scene image).
+- Supports batch triggers for missing images/videos.
+- Displays scene job queue + full trigger job queue + log tail.
+- Includes a scrollable script editor panel.
 
 ## Start
 ```bash
@@ -18,18 +21,34 @@ python3 dashboard/app.py
 Open:
 - `http://127.0.0.1:5055`
 
-## API Endpoints
+## Core API Endpoints
 - `GET /api/overview`
-- `GET /api/runs`
-- `GET /api/runs/<run_id>`
+- `GET /api/scenes`
+- `PATCH /api/scenes/<scene_id>`
+- `POST /api/scenes/<scene_id>/generate-image`
+- `POST /api/scenes/<scene_id>/generate-video`
+- `POST /api/scenes/generate-images`
+- `POST /api/scenes/generate-videos`
+- `GET /api/scene-jobs`
+- `GET /api/character`
+- `POST /api/character/generate`
+- `GET /api/script`
+- `PATCH /api/script`
 - `GET /api/jobs`
 - `GET /api/jobs/<job_id>/log`
 - `POST /api/trigger`
 
-## Trigger Request Example
+## Scene Trigger Example
 ```json
 {
-  "dry_run": true,
-  "provider": "auto"
+  "dry_run": true
+}
+```
+
+## Batch Example
+```json
+{
+  "dry_run": false,
+  "only_missing": true
 }
 ```

@@ -19,6 +19,7 @@
 - WAN 2.2 image-to-video:
   - Requires `input.image` and `input.prompt`.
   - Use `duration=6`, `resolution=720p` for Shorts-ready clips.
+  - Scene video generation must be blocked until scene image URL exists.
 
 ## Character Consistency Pattern
 1. Generate character model image first.

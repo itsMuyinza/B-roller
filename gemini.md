@@ -129,6 +129,26 @@
 }
 ```
 
+### Scene Grid Record (Editable)
+```json
+{
+  "scene_id": "string",
+  "position": 1,
+  "narration": "string",
+  "image_prompt": "string",
+  "motion_prompt": "string",
+  "reference_images": ["string"],
+  "image_status": "pending|running|completed|failed",
+  "image_task_id": "string|null",
+  "image_url": "string|null",
+  "video_status": "pending|running|completed|failed",
+  "video_task_id": "string|null",
+  "video_url": "string|null",
+  "last_error": "string|null",
+  "updated_at": "ISO-8601 UTC"
+}
+```
+
 ## Execution Architecture
 - `tools/wavespeed_story_pipeline.py`
   - Character-first consistency generation.
@@ -162,7 +182,13 @@
     - Backend: `dashboard/app.py`
     - Frontend: `dashboard/templates/index.html`, `dashboard/static/*`
     - Runbook: `architecture/dashboard_ui_runbook.md`
-  - Dashboard includes scrollable full script panel and trigger launcher with dry/live mode.
+  - Upgraded dashboard to Airtable-like scene grid:
+    - Inline prompt editing per scene.
+    - Per-scene `Generate Image` and `Generate Video` actions.
+    - Batch generation actions (`Generate Missing Images`, `Generate Missing Videos`).
+    - Character-model-first generation control.
+    - Scrollable script editor panel with save support.
+    - Scene jobs queue + full trigger jobs queue with log tail.
   - Validation run (dry): `python3 tools/run_phase5_trigger.py --dry-run` succeeded, scene_count=8.
   - Validation run (live transfer): cloud upload succeeded to Cloudinary fallback.
   - Observed error: Supabase target table missing (`PGRST205`, table `public.aprt_story_payloads` not found).

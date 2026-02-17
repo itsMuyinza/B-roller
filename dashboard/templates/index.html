@@ -3,121 +3,169 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>APRT Trigger Dashboard</title>
+    <title>APRT B-Roll Control Board</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <div class="bg-gradient"></div>
-    <div class="bg-grid"></div>
-    <header class="topbar reveal">
+    <header class="topbar">
       <div class="brand">
         <p class="kicker">APRT PHASE 5</p>
-        <h1>Trigger Control Grid</h1>
+        <h1>B-Roll Trigger Dashboard</h1>
       </div>
-      <div class="actions">
+      <div class="toolbar">
+        <label class="control">
+          Generation Mode
+          <select id="modeSelect">
+            <option value="dry">Dry Run</option>
+            <option value="live">Live Run</option>
+          </select>
+        </label>
+        <label class="control">
+          Cloud Provider
+          <select id="providerSelect">
+            <option value="auto">Auto</option>
+            <option value="supabase">Supabase</option>
+            <option value="cloudinary">Cloudinary</option>
+          </select>
+        </label>
         <button id="refreshBtn" class="btn btn-muted">Refresh</button>
       </div>
     </header>
 
-    <nav class="viewbar reveal">
-      <span class="pill active">Runs Table</span>
-      <span class="pill">Trigger Queue</span>
-      <span class="pill">Script Pane</span>
+    <nav class="actionbar">
+      <button id="genCharacterBtn" class="btn btn-primary">Generate Character Model</button>
+      <button id="genAllImagesBtn" class="btn btn-primary">Generate Missing Images</button>
+      <button id="genAllVideosBtn" class="btn btn-primary">Generate Missing Videos</button>
+      <button id="runFullTriggerBtn" class="btn btn-muted">Run Full Trigger</button>
     </nav>
 
     <main class="layout">
-      <section class="panel panel-triggers reveal">
+      <section class="panel scenes-panel">
         <div class="panel-head">
-          <h2>Trigger Launcher</h2>
-          <p>Start dry or live runs from this dashboard.</p>
-        </div>
-
-        <form id="triggerForm" class="trigger-form">
-          <label>
-            Mode
-            <select id="modeSelect">
-              <option value="dry">Dry Run</option>
-              <option value="live">Live Run</option>
-            </select>
-          </label>
-          <label>
-            Provider
-            <select id="providerSelect">
-              <option value="auto">Auto (Supabase -> Cloudinary)</option>
-              <option value="supabase">Supabase Only</option>
-              <option value="cloudinary">Cloudinary Only</option>
-            </select>
-          </label>
-          <button type="submit" class="btn btn-primary">Launch Trigger</button>
-        </form>
-
-        <div class="trigger-meta">
-          <h3>Configured Triggers</h3>
-          <div id="triggerInfo" class="trigger-info"></div>
-        </div>
-      </section>
-
-      <section class="panel panel-runs reveal">
-        <div class="panel-head">
-          <h2>Runs (Airtable View)</h2>
-          <p>Latest payload runs and cloud transfer outcomes.</p>
+          <h2>Scenes Grid (Editable)</h2>
+          <p>Edit prompts inline, then trigger images/videos per scene.</p>
         </div>
         <div class="table-wrap">
-          <table id="runsTable">
+          <table id="scenesTable">
             <thead>
               <tr>
-                <th>Run ID</th>
-                <th>Status</th>
-                <th>Scenes</th>
-                <th>Cloud</th>
-                <th>Started (UTC)</th>
-                <th>Ended (UTC)</th>
-                <th>Destination</th>
+                <th>#</th>
+                <th>Scene</th>
+                <th>Narration</th>
+                <th>Image Prompt</th>
+                <th>Motion Prompt</th>
+                <th>Image</th>
+                <th>Video</th>
+                <th>Actions</th>
               </tr>
             </thead>
-            <tbody id="runsBody"></tbody>
+            <tbody id="scenesBody"></tbody>
           </table>
         </div>
       </section>
 
-      <section class="panel panel-jobs reveal">
+      <aside class="sidebar">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Character Consistency</h2>
+            <p>Model-first image consistency for all scenes.</p>
+          </div>
+          <div id="characterBox" class="character-box"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Script Panel</h2>
+            <p id="scriptPath">Loading script path...</p>
+          </div>
+          <div class="script-editor-wrap">
+            <textarea id="scriptEditor" class="script-editor"></textarea>
+            <button id="saveScriptBtn" class="btn btn-muted">Save Script</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Trigger Map</h2>
+            <p>Cron + webhook visibility.</p>
+          </div>
+          <div id="triggerInfo" class="meta-stack"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Recent Runs</h2>
+            <p>Latest payload outputs.</p>
+          </div>
+          <div class="mini-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Run</th>
+                  <th>Status</th>
+                  <th>Cloud</th>
+                </tr>
+              </thead>
+              <tbody id="runsBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </aside>
+
+      <section class="panel jobs-panel">
         <div class="panel-head">
-          <h2>Trigger Queue</h2>
-          <p>Background trigger job history and log tail.</p>
+          <h2>Scene Jobs Queue</h2>
+          <p>Per-scene image/video generation job status.</p>
         </div>
-        <div class="jobs-wrap">
-          <table id="jobsTable">
+        <div class="table-wrap compact">
+          <table>
+            <thead>
+              <tr>
+                <th>Job ID</th>
+                <th>Scene</th>
+                <th>Stage</th>
+                <th>Mode</th>
+                <th>Status</th>
+                <th>Requested</th>
+                <th>Finished</th>
+                <th>Error</th>
+              </tr>
+            </thead>
+            <tbody id="sceneJobsBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel jobs-panel">
+        <div class="panel-head">
+          <h2>Full Trigger Jobs</h2>
+          <p>Whole-pipeline run history and log tail.</p>
+        </div>
+        <div class="table-wrap compact">
+          <table>
             <thead>
               <tr>
                 <th>Job ID</th>
                 <th>Mode</th>
                 <th>Provider</th>
                 <th>Status</th>
-                <th>Requested (UTC)</th>
-                <th>Finished (UTC)</th>
+                <th>Requested</th>
+                <th>Finished</th>
               </tr>
             </thead>
-            <tbody id="jobsBody"></tbody>
+            <tbody id="triggerJobsBody"></tbody>
           </table>
         </div>
-        <div class="log-pane">
-          <h3>Selected Job Log</h3>
-          <pre id="jobLog"></pre>
+        <div class="log-wrap">
+          <h3>Selected Trigger Log</h3>
+          <pre id="triggerLog"></pre>
         </div>
-      </section>
-
-      <section class="panel panel-script reveal">
-        <div class="panel-head">
-          <h2>Script Viewer</h2>
-          <p id="scriptPath">Loading script path...</p>
-        </div>
-        <pre id="scriptText" class="script-text"></pre>
       </section>
     </main>
 

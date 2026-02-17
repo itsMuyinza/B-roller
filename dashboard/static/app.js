@@ -1,207 +1,462 @@
-const runsBody = document.getElementById("runsBody");
-const jobsBody = document.getElementById("jobsBody");
-const scriptText = document.getElementById("scriptText");
-const scriptPath = document.getElementById("scriptPath");
-const triggerInfo = document.getElementById("triggerInfo");
-const jobLog = document.getElementById("jobLog");
 const modeSelect = document.getElementById("modeSelect");
 const providerSelect = document.getElementById("providerSelect");
-const triggerForm = document.getElementById("triggerForm");
 const refreshBtn = document.getElementById("refreshBtn");
+
+const genCharacterBtn = document.getElementById("genCharacterBtn");
+const genAllImagesBtn = document.getElementById("genAllImagesBtn");
+const genAllVideosBtn = document.getElementById("genAllVideosBtn");
+const runFullTriggerBtn = document.getElementById("runFullTriggerBtn");
+
+const scenesBody = document.getElementById("scenesBody");
+const sceneJobsBody = document.getElementById("sceneJobsBody");
+const triggerJobsBody = document.getElementById("triggerJobsBody");
+const runsBody = document.getElementById("runsBody");
+
+const characterBox = document.getElementById("characterBox");
+const triggerInfo = document.getElementById("triggerInfo");
+
+const scriptPath = document.getElementById("scriptPath");
+const scriptEditor = document.getElementById("scriptEditor");
+const saveScriptBtn = document.getElementById("saveScriptBtn");
+
+const triggerLog = document.getElementById("triggerLog");
 const toast = document.getElementById("toast");
 
-let selectedJobId = null;
+let selectedTriggerJobId = null;
+
+function isDryRun() {
+  return modeSelect.value === "dry";
+}
 
 function showToast(message, isError = false) {
   toast.textContent = message;
-  toast.style.background = isError ? "#7f1d1d" : "#0f172a";
+  toast.style.borderColor = isError ? "#7f1d1d" : "#2b3a57";
+  toast.style.background = isError ? "#2b1313" : "#101a30";
   toast.classList.add("show");
-  setTimeout(() => toast.classList.remove("show"), 1800);
+  setTimeout(() => toast.classList.remove("show"), 2200);
 }
 
-function statusChip(value) {
-  const normalized = (value || "unknown").toLowerCase();
-  const safe =
-    normalized === "completed" || normalized === "success"
-      ? "success"
-      : normalized === "running"
-      ? "running"
-      : normalized === "failed"
-      ? "failed"
-      : normalized === "pending"
-      ? "pending"
-      : "pending";
-  return `<span class="status-chip status-${safe}">${value || "unknown"}</span>`;
-}
-
-function safeText(value) {
+function esc(value) {
   if (value === null || value === undefined) return "";
   return String(value)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
-async function fetchJson(path, opts) {
-  const resp = await fetch(path, opts);
-  if (!resp.ok) {
-    throw new Error(`Request failed: ${resp.status}`);
+function statusChip(status) {
+  const normalized = (status || "unknown").toLowerCase();
+  const safe = ["completed", "success", "running", "failed", "pending"].includes(normalized)
+    ? normalized
+    : "unknown";
+  return `<span class="status-chip status-${safe}">${esc(status || "unknown")}</span>`;
+}
+
+async function requestJson(url, options) {
+  const response = await fetch(url, options);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || `HTTP ${response.status}`);
   }
-  return resp.json();
+  return data;
 }
 
 function renderTriggerInfo(overview) {
-  const trigger = overview.triggers || {};
-  const workflow = trigger.github_workflow || {};
-  const webhook = trigger.local_webhook || {};
-  const localCron = trigger.local_cron || {};
+  const triggers = overview.triggers || {};
+  const gh = triggers.github_workflow || {};
+  const webhook = triggers.local_webhook || {};
+  const localCron = triggers.local_cron || {};
 
-  const cronText = Array.isArray(workflow.schedule_cron_utc) && workflow.schedule_cron_utc.length
-    ? workflow.schedule_cron_utc.join(", ")
-    : "No cron configured";
+  const cron = Array.isArray(gh.schedule_cron_utc) && gh.schedule_cron_utc.length
+    ? gh.schedule_cron_utc.join(", ")
+    : "No cron schedule";
   const localCronText = Array.isArray(localCron.entries) && localCron.entries.length
     ? localCron.entries.join("\n")
-    : "No local cron entry found";
+    : "No local cron entries";
 
   triggerInfo.innerHTML = `
-    <div class="meta-row">
+    <div class="meta-item">
       <div class="meta-key">GitHub Workflow</div>
-      <div class="meta-value">${safeText(workflow.name || "")}</div>
+      <div class="meta-value">${esc(gh.name || "")}</div>
     </div>
-    <div class="meta-row">
+    <div class="meta-item">
       <div class="meta-key">Cloud Cron (UTC)</div>
-      <div class="meta-value">${safeText(cronText)}</div>
+      <div class="meta-value">${esc(cron)}</div>
     </div>
-    <div class="meta-row">
+    <div class="meta-item">
       <div class="meta-key">Local Webhook</div>
-      <div class="meta-value">${safeText(webhook.path || "")}</div>
+      <div class="meta-value">${esc(webhook.path || "")}</div>
     </div>
-    <div class="meta-row">
+    <div class="meta-item">
       <div class="meta-key">Local Cron</div>
-      <div class="meta-value">${safeText(localCronText)}</div>
+      <div class="meta-value">${esc(localCronText)}</div>
     </div>
   `;
 }
 
-function renderRuns(data) {
-  const runs = data.runs || [];
-  if (!runs.length) {
-    runsBody.innerHTML = `<tr><td colspan="7">No runs yet.</td></tr>`;
+function renderCharacter(character) {
+  const status = character?.status || "pending";
+  const imageUrl = character?.image_url || "";
+  const taskId = character?.task_id || "-";
+  const lastError = character?.last_error || "";
+
+  characterBox.innerHTML = `
+    <div class="kv">
+      <div class="k">Status</div>
+      <div class="v">${statusChip(status)}</div>
+    </div>
+    <div class="kv">
+      <div class="k">Task ID</div>
+      <div class="v">${esc(taskId)}</div>
+    </div>
+    ${
+      imageUrl
+        ? `<img class="character-preview" src="${esc(imageUrl)}" alt="Character model" />`
+        : `<div class="preview-placeholder">No character model image yet</div>`
+    }
+    ${lastError ? `<div class="kv"><div class="k">Last Error</div><div class="v">${esc(lastError)}</div></div>` : ""}
+  `;
+}
+
+function scenePreview(url, type) {
+  if (!url) return `<div class="preview-placeholder">No ${type}</div>`;
+  if (type === "image") {
+    return `<img class="preview" src="${esc(url)}" alt="Scene image" loading="lazy" />`;
+  }
+  return `<video class="preview" src="${esc(url)}" controls muted preload="none"></video>`;
+}
+
+function renderScenes(items) {
+  if (!items.length) {
+    scenesBody.innerHTML = `<tr><td colspan="8">No scenes found.</td></tr>`;
     return;
   }
-  runsBody.innerHTML = runs
+
+  scenesBody.innerHTML = items
+    .map((scene) => {
+      return `
+      <tr data-scene-id="${esc(scene.scene_id)}">
+        <td>${esc(scene.position)}</td>
+        <td>
+          <div class="scene-id">${esc(scene.scene_id)}</div>
+          <div class="scene-sub">Updated: ${esc(scene.updated_at || "")}</div>
+          ${scene.last_error ? `<div class="scene-sub" style="color:#fda4af">${esc(scene.last_error)}</div>` : ""}
+        </td>
+        <td>
+          <textarea class="cell-editor" data-field="narration">${esc(scene.narration || "")}</textarea>
+        </td>
+        <td>
+          <textarea class="cell-editor" data-field="image_prompt">${esc(scene.image_prompt || "")}</textarea>
+        </td>
+        <td>
+          <textarea class="cell-editor" data-field="motion_prompt">${esc(scene.motion_prompt || "")}</textarea>
+        </td>
+        <td>
+          ${statusChip(scene.image_status || "pending")}
+          ${scenePreview(scene.image_url, "image")}
+        </td>
+        <td>
+          ${statusChip(scene.video_status || "pending")}
+          ${scenePreview(scene.video_url, "video")}
+        </td>
+        <td>
+          <div class="actions-cell">
+            <button class="btn btn-sm btn-muted" data-action="save">Save Prompt</button>
+            <button class="btn btn-sm btn-primary" data-action="image">Generate Image</button>
+            <button class="btn btn-sm btn-primary" data-action="video">Generate Video</button>
+          </div>
+        </td>
+      </tr>
+    `;
+    })
+    .join("");
+
+  scenesBody.querySelectorAll("tr[data-scene-id]").forEach((row) => {
+    const sceneId = row.getAttribute("data-scene-id");
+
+    row.querySelector('[data-action="save"]').addEventListener("click", async () => {
+      const narration = row.querySelector('[data-field="narration"]').value;
+      const imagePrompt = row.querySelector('[data-field="image_prompt"]').value;
+      const motionPrompt = row.querySelector('[data-field="motion_prompt"]').value;
+      try {
+        await requestJson(`/api/scenes/${encodeURIComponent(sceneId)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            narration,
+            image_prompt: imagePrompt,
+            motion_prompt: motionPrompt,
+          }),
+        });
+        showToast(`Saved ${sceneId}`);
+        await refreshScenes();
+      } catch (err) {
+        showToast(`Save failed (${sceneId}): ${err.message}`, true);
+      }
+    });
+
+    row.querySelector('[data-action="image"]').addEventListener("click", async () => {
+      try {
+        await requestJson(`/api/scenes/${encodeURIComponent(sceneId)}/generate-image`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dry_run: isDryRun() }),
+        });
+        showToast(`Image job started for ${sceneId}`);
+        await Promise.all([refreshSceneJobs(), refreshScenes(), refreshCharacter()]);
+      } catch (err) {
+        showToast(`Image trigger failed (${sceneId}): ${err.message}`, true);
+      }
+    });
+
+    row.querySelector('[data-action="video"]').addEventListener("click", async () => {
+      try {
+        await requestJson(`/api/scenes/${encodeURIComponent(sceneId)}/generate-video`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dry_run: isDryRun() }),
+        });
+        showToast(`Video job started for ${sceneId}`);
+        await Promise.all([refreshSceneJobs(), refreshScenes()]);
+      } catch (err) {
+        showToast(`Video trigger failed (${sceneId}): ${err.message}`, true);
+      }
+    });
+  });
+}
+
+function renderSceneJobs(data) {
+  const jobs = data.jobs || [];
+  if (!jobs.length) {
+    sceneJobsBody.innerHTML = `<tr><td colspan="8">No scene jobs yet.</td></tr>`;
+    return;
+  }
+
+  sceneJobsBody.innerHTML = jobs
     .map(
-      (run) => `
+      (job) => `
       <tr>
-        <td class="run-id">${safeText(run.run_id)}</td>
-        <td>${statusChip(run.status)}</td>
-        <td>${safeText(run.scene_count)}</td>
-        <td>${statusChip(run.cloud_status || run.cloud_provider || "pending")}</td>
-        <td>${safeText(run.started_at || "")}</td>
-        <td>${safeText(run.ended_at || "")}</td>
-        <td title="${safeText(run.cloud_destination || "")}">${safeText(
-        (run.cloud_destination || "").slice(0, 78)
-      )}</td>
+        <td>${esc(job.id)}</td>
+        <td>${esc(job.scene_id || "-")}</td>
+        <td>${esc(job.stage)}</td>
+        <td>${esc(job.mode)}</td>
+        <td>${statusChip(job.status)}</td>
+        <td>${esc(job.requested_at || "")}</td>
+        <td>${esc(job.finished_at || "")}</td>
+        <td>${esc(job.error || "")}</td>
       </tr>
     `
     )
     .join("");
 }
 
-function renderJobs(data) {
-  const jobs = data.jobs || [];
-  if (!jobs.length) {
-    jobsBody.innerHTML = `<tr><td colspan="6">No trigger jobs yet.</td></tr>`;
+function renderRuns(data) {
+  const runs = data.runs || [];
+  if (!runs.length) {
+    runsBody.innerHTML = `<tr><td colspan="3">No runs yet.</td></tr>`;
     return;
   }
-  jobsBody.innerHTML = jobs
+
+  runsBody.innerHTML = runs
+    .slice(0, 12)
+    .map(
+      (run) => `
+      <tr>
+        <td title="${esc(run.run_id)}">${esc((run.run_id || "").slice(0, 16))}</td>
+        <td>${statusChip(run.status)}</td>
+        <td>${statusChip(run.cloud_status || "pending")}</td>
+      </tr>
+    `
+    )
+    .join("");
+}
+
+async function loadTriggerLog(jobId) {
+  try {
+    const data = await requestJson(`/api/jobs/${encodeURIComponent(jobId)}/log`);
+    triggerLog.textContent = data.log || "No log output yet.";
+  } catch (err) {
+    triggerLog.textContent = `Could not load log: ${err.message}`;
+  }
+}
+
+function renderTriggerJobs(data) {
+  const jobs = data.jobs || [];
+  if (!jobs.length) {
+    triggerJobsBody.innerHTML = `<tr><td colspan="6">No trigger jobs yet.</td></tr>`;
+    return;
+  }
+
+  triggerJobsBody.innerHTML = jobs
     .map((job) => {
-      const selectedClass = selectedJobId === job.id ? ' style="background:#fff7ed;"' : "";
+      const selected = selectedTriggerJobId === job.id ? ' style="background:rgba(255,138,61,0.1)"' : "";
       return `
-      <tr data-job-id="${safeText(job.id)}"${selectedClass}>
-        <td class="run-id">${safeText(job.id)}</td>
-        <td>${safeText(job.mode)}</td>
-        <td>${safeText(job.provider)}</td>
+      <tr data-job-id="${esc(job.id)}"${selected}>
+        <td>${esc(job.id)}</td>
+        <td>${esc(job.mode)}</td>
+        <td>${esc(job.provider)}</td>
         <td>${statusChip(job.status)}</td>
-        <td>${safeText(job.requested_at || "")}</td>
-        <td>${safeText(job.finished_at || "")}</td>
+        <td>${esc(job.requested_at || "")}</td>
+        <td>${esc(job.finished_at || "")}</td>
       </tr>
     `;
     })
     .join("");
 
-  jobsBody.querySelectorAll("tr[data-job-id]").forEach((row) => {
+  triggerJobsBody.querySelectorAll("tr[data-job-id]").forEach((row) => {
     row.addEventListener("click", async () => {
-      const jobId = row.getAttribute("data-job-id");
-      selectedJobId = jobId;
-      await loadJobLog(jobId);
-      await refreshJobsOnly();
+      selectedTriggerJobId = row.getAttribute("data-job-id");
+      await loadTriggerLog(selectedTriggerJobId);
+      await refreshTriggerJobs();
     });
   });
 }
 
-async function loadJobLog(jobId) {
-  try {
-    const data = await fetchJson(`/api/jobs/${encodeURIComponent(jobId)}/log`);
-    jobLog.textContent = data.log || "No log output yet.";
-  } catch (err) {
-    jobLog.textContent = `Could not load log: ${err.message}`;
+async function refreshOverview() {
+  const data = await requestJson("/api/overview");
+  renderTriggerInfo(data);
+  renderCharacter(data.character || {});
+  const script = data.script_panel || {};
+  scriptPath.textContent = script.script_path || "Script path unavailable";
+  if (document.activeElement !== scriptEditor) {
+    scriptEditor.value = script.script_text || "";
   }
 }
 
-async function refreshOverview() {
-  const data = await fetchJson("/api/overview");
-  renderTriggerInfo(data);
-  const script = data.script_panel || {};
-  scriptPath.textContent = script.script_path || "Script path unavailable";
-  scriptText.textContent = script.script_text || "No script content found.";
+async function refreshScenes() {
+  const data = await requestJson("/api/scenes");
+  renderScenes(data.scenes || []);
 }
 
-async function refreshRunsOnly() {
-  const data = await fetchJson("/api/runs");
+async function refreshSceneJobs() {
+  const data = await requestJson("/api/scene-jobs");
+  renderSceneJobs(data);
+}
+
+async function refreshRuns() {
+  const data = await requestJson("/api/runs");
   renderRuns(data);
 }
 
-async function refreshJobsOnly() {
-  const data = await fetchJson("/api/jobs");
-  renderJobs(data);
+async function refreshTriggerJobs() {
+  const data = await requestJson("/api/jobs");
+  renderTriggerJobs(data);
+}
+
+async function refreshCharacter() {
+  const data = await requestJson("/api/character");
+  renderCharacter(data);
 }
 
 async function refreshAll() {
   try {
-    await Promise.all([refreshOverview(), refreshRunsOnly(), refreshJobsOnly()]);
-    if (selectedJobId) {
-      await loadJobLog(selectedJobId);
+    await Promise.all([
+      refreshOverview(),
+      refreshScenes(),
+      refreshSceneJobs(),
+      refreshRuns(),
+      refreshTriggerJobs(),
+    ]);
+    if (selectedTriggerJobId) {
+      await loadTriggerLog(selectedTriggerJobId);
     }
   } catch (err) {
     showToast(`Refresh failed: ${err.message}`, true);
   }
 }
 
-triggerForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const dryRun = modeSelect.value === "dry";
-  const provider = providerSelect.value;
-  try {
-    const data = await fetchJson("/api/trigger", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dry_run: dryRun, provider }),
-    });
-    selectedJobId = data.id;
-    showToast(`Trigger started: ${data.id}`);
-    await refreshAll();
-    await loadJobLog(data.id);
-  } catch (err) {
-    showToast(`Trigger failed: ${err.message}`, true);
-  }
-});
-
 refreshBtn.addEventListener("click", async () => {
   await refreshAll();
   showToast("Dashboard refreshed");
 });
 
+genCharacterBtn.addEventListener("click", async () => {
+  try {
+    await requestJson("/api/character/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dry_run: isDryRun() }),
+    });
+    showToast("Character generation started");
+    await Promise.all([refreshCharacter(), refreshSceneJobs()]);
+  } catch (err) {
+    showToast(`Character trigger failed: ${err.message}`, true);
+  }
+});
+
+genAllImagesBtn.addEventListener("click", async () => {
+  try {
+    const data = await requestJson("/api/scenes/generate-images", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dry_run: isDryRun(), only_missing: true }),
+    });
+    const count = (data.launched || []).length;
+    showToast(`Started ${count} image jobs`);
+    await Promise.all([refreshSceneJobs(), refreshScenes(), refreshCharacter()]);
+  } catch (err) {
+    showToast(`Image batch failed: ${err.message}`, true);
+  }
+});
+
+genAllVideosBtn.addEventListener("click", async () => {
+  try {
+    const data = await requestJson("/api/scenes/generate-videos", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dry_run: isDryRun(), only_missing: true }),
+    });
+    const count = (data.launched || []).length;
+    showToast(`Started ${count} video jobs`);
+    await Promise.all([refreshSceneJobs(), refreshScenes()]);
+  } catch (err) {
+    showToast(`Video batch failed: ${err.message}`, true);
+  }
+});
+
+runFullTriggerBtn.addEventListener("click", async () => {
+  try {
+    const data = await requestJson("/api/trigger", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dry_run: isDryRun(),
+        provider: providerSelect.value,
+      }),
+    });
+    selectedTriggerJobId = data.id;
+    showToast(`Full trigger started: ${data.id}`);
+    await refreshTriggerJobs();
+    await loadTriggerLog(data.id);
+  } catch (err) {
+    showToast(`Full trigger failed: ${err.message}`, true);
+  }
+});
+
+saveScriptBtn.addEventListener("click", async () => {
+  try {
+    await requestJson("/api/script", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ script_text: scriptEditor.value }),
+    });
+    showToast("Script saved");
+    await refreshOverview();
+  } catch (err) {
+    showToast(`Script save failed: ${err.message}`, true);
+  }
+});
+
 refreshAll();
-setInterval(refreshJobsOnly, 7000);
-setInterval(refreshRunsOnly, 12000);
+setInterval(async () => {
+  const active = document.activeElement;
+  const editing = active && active.tagName === "TEXTAREA" && active.classList.contains("cell-editor");
+  if (!editing) {
+    await refreshScenes();
+  }
+  await refreshSceneJobs();
+  await refreshTriggerJobs();
+  await refreshRuns();
+  await refreshCharacter();
+}, 8000);

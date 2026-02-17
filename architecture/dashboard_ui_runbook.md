@@ -1,10 +1,11 @@
 # Dashboard UI Runbook
 
 ## Scope
-- Provide a local UI for Trigger control, run visibility, and script review.
-- Mimic Airtable-style grid behavior for fast scanning.
+- Airtable-like scene board for Script 3 generation.
+- Inline prompt edits and scene-by-scene trigger control.
+- Character-model-first consistency workflow.
 
-## Start Command
+## Start
 ```bash
 python3 dashboard/app.py
 ```
@@ -12,31 +13,39 @@ python3 dashboard/app.py
 ## URL
 - `http://127.0.0.1:5055`
 
-## Panels
-1. Trigger Launcher:
-   - Choose mode (`Dry Run` or `Live Run`).
-   - Choose cloud provider strategy (`auto`, `supabase`, `cloudinary`).
-   - Launch pipeline trigger.
-2. Runs Table:
-   - Displays `run_id`, run status, scene count, cloud transfer status and destination.
-3. Trigger Queue:
-   - Displays background jobs and completion status.
-   - Job log tail visible on row click.
-4. Script Viewer:
-   - Full scrollable content from `tools/config/script_3_voiceover.md`.
+## Board Workflow
+1. Generate character model:
+   - Click `Generate Character Model`.
+2. Edit prompts:
+   - Update scene row prompts directly in the grid.
+   - Click `Save Prompt` on that row.
+3. Generate images:
+   - Per-row: `Generate Image`
+   - Batch: `Generate Missing Images`
+4. Generate videos:
+   - Per-row: `Generate Video`
+   - Batch: `Generate Missing Videos`
+5. Monitor queues:
+   - Scene Jobs queue for per-scene stages.
+   - Full Trigger Jobs queue for full pipeline runs.
 
 ## Data Sources
-- Runs: `.tmp/phase5_story3/payload_*.json`
-- Trigger jobs: `.tmp/dashboard/dashboard.db`
-- Logs: `.tmp/logs/dashboard_trigger_*.log`
-- Trigger definitions:
-  - `.github/workflows/phase5_story3_trigger.yml`
-  - `crontab -l` entries containing `run_phase5_trigger.py`
+- Scene records: `dashboard` SQLite table `scenes` in `.tmp/dashboard/dashboard.db`
+- Scene jobs: `scene_jobs` table in `.tmp/dashboard/dashboard.db`
+- Trigger jobs: `trigger_jobs` table in `.tmp/dashboard/dashboard.db`
+- Payload outputs: `.tmp/phase5_story3/payload_*.json`
+- Full trigger logs: `.tmp/logs/dashboard_trigger_*.log`
+- Script source: `tools/config/script_3_voiceover.md`
 
-## Failure Recovery
-1. If trigger launch fails, inspect:
-   - `.tmp/logs/dashboard_trigger_<job_id>.log`
-2. Patch backend in:
-   - `dashboard/app.py`
-3. Re-test by POST trigger from UI.
-4. Update this runbook and `gemini.md` maintenance log with findings.
+## Failure / Repair Loop
+1. Analyze:
+   - Scene errors in `last_error` column in grid.
+   - Queue errors in Scene Jobs table.
+   - Full trigger logs in Trigger Jobs panel.
+2. Patch:
+   - Backend: `dashboard/app.py`
+   - Frontend: `dashboard/static/app.js`, `dashboard/static/styles.css`
+3. Test:
+   - Re-run scene-level dry run from board.
+4. Document:
+   - Update `gemini.md` maintenance log and this runbook.
