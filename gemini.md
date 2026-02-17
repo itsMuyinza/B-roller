@@ -224,6 +224,7 @@
   - Improved table usability:
     - Scene actions column is sticky in desktop table mode to reduce clipping/jank on narrower viewports.
   - Fixed simulated dry-run media preview handling to prevent broken-media rendering.
+  - Replaced Pinterest short-link style reference with direct Cloudinary image URL for reliable style conditioning.
   - Validation run (dry): `python3 tools/run_phase5_trigger.py --dry-run` succeeded, scene_count=8.
   - Validation run (live transfer): cloud upload succeeded to Cloudinary fallback.
   - Observed error: Supabase target table missing (`PGRST205`, table `public.aprt_story_payloads` not found).
