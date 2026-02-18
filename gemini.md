@@ -338,6 +338,8 @@
   - Improved character auto-consistency behavior:
     - Story/script registry matches now preferred when inferring target character.
     - Auto-attach from story invoked during bootstrap, script saves, and scene preflight.
+  - Added serverless scene-job stale recovery:
+    - Recovers stale `running` scene jobs (missing task id or timed-out) instead of blocking new button triggers.
   - Added UI controls for character library:
     - `Search Library`, `Match From Script`, and `Attach To Story`.
     - Expanded textarea defaults for easier long-form prompt editing.
@@ -346,6 +348,7 @@
     - JS syntax check passed (`dashboard/static/app.js`).
     - Flask API smoke tests passed for all button-backed endpoints.
     - Browser automation smoke test (playwright-cli) successfully exercised topbar actions, character controls, and scene row trigger actions.
+    - Live submit probe confirmed WaveSpeed task submission path (`scene image` submit-only on serverless path returned task id).
 - 2026-02-17:
   - Added Phase 5 trigger deployment scaffolding.
   - Added payload schema before coding (Data-First rule satisfied).

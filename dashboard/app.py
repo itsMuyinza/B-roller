@@ -14,7 +14,7 @@ import subprocess
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
@@ -3440,7 +3440,7 @@ def start_scene_job(scene_id: str, stage: str, dry_run: bool) -> Dict[str, Any]:
         with db_conn() as conn:
             row = conn.execute(
                 """
-                select id from scene_jobs
+                select id, task_id, requested_at from scene_jobs
                 where scene_id = ? and stage = ? and status = 'running'
                 order by requested_at desc
                 limit 1
@@ -3448,7 +3448,21 @@ def start_scene_job(scene_id: str, stage: str, dry_run: bool) -> Dict[str, Any]:
                 (scene_id, stage),
             ).fetchone()
         if row is not None:
-            raise DashboardError(f"{stage} job already running for {scene_id}")
+            existing_task_id = str(row["task_id"] or "").strip()
+            requested_at = parse_timestamp(row["requested_at"])
+            scene_status = str(scene.get(f"{stage}_status", "")).strip().lower()
+            stale_no_task = not existing_task_id and scene_status != "running"
+            stale_timeout = requested_at < (datetime.now(timezone.utc) - timedelta(minutes=30))
+            if stale_no_task or stale_timeout:
+                stale_reason = "stale timeout" if stale_timeout else "no task id"
+                update_scene_job(
+                    row["id"],
+                    status="failed",
+                    task_id=existing_task_id or None,
+                    error=f"Recovered stale running job ({stale_reason})",
+                )
+            else:
+                raise DashboardError(f"{stage} job already running for {scene_id}")
 
     if stage == "video" and not scene.get("image_url"):
         raise DashboardError("Cannot generate video before image is generated.")

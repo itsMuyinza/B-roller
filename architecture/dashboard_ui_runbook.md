@@ -94,3 +94,5 @@ Audit behavior:
 - Run snapshots now sync on each trigger action:
   - Scene-level buttons, batch runs, script save, character generation, and full-trigger requests all write run payload snapshots.
   - Snapshot retrieval merges local payload files with Supabase records in `GET /api/runs`.
+- Serverless stale-job guard:
+  - If a prior `running` scene job is stale (no task id or timed out), the backend auto-recovers it and allows the new trigger to proceed.
