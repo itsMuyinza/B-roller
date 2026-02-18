@@ -288,7 +288,7 @@ tbody tr:hover {
 .cell-editor {
   width: 100%;
   min-width: 140px;
-  min-height: 92px;
+  min-height: 104px;
   resize: none;
   border-radius: 11px;
   border: 1px solid rgba(170, 192, 237, 0.35);
@@ -582,8 +582,17 @@ tbody tr:hover {
 }
 
 .character-textarea {
-  min-height: 88px;
+  min-height: 100px;
   resize: none;
+}
+
+.character-library-tools {
+  border: 1px solid rgba(170, 192, 237, 0.18);
+  border-radius: 12px;
+  padding: 10px;
+  background: rgba(8, 16, 31, 0.42);
+  display: grid;
+  gap: 8px;
 }
 
 .character-buttons {
@@ -631,7 +640,7 @@ tbody tr:hover {
 .registry-list {
   display: grid;
   gap: 8px;
-  max-height: 320px;
+  max-height: 420px;
   overflow: auto;
   padding-right: 2px;
 }

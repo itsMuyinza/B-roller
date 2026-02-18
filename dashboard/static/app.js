@@ -28,6 +28,9 @@ const autoBindCharacterBtn = document.getElementById("autoBindCharacterBtn");
 const characterPromptPreview = document.getElementById("characterPromptPreview");
 const characterAuditBox = document.getElementById("characterAuditBox");
 const characterRegistryBox = document.getElementById("characterRegistryBox");
+const characterLibrarySearchInput = document.getElementById("characterLibrarySearchInput");
+const characterLibrarySearchBtn = document.getElementById("characterLibrarySearchBtn");
+const characterAutoMatchBtn = document.getElementById("characterAutoMatchBtn");
 const triggerInfo = document.getElementById("triggerInfo");
 
 const scriptPath = document.getElementById("scriptPath");
@@ -51,6 +54,7 @@ let selectedTriggerJobId = null;
 let pollInFlight = false;
 let warnedNoWaveSpeed = false;
 let activeExpandedTextarea = null;
+let registrySearchTerm = "";
 
 function isDryRun() {
   return modeSelect.value === "dry";
@@ -160,10 +164,10 @@ function bindExpandableTextarea(node, label) {
 
 function initializeLongTextEditors() {
   const staticTextareas = [
-    [characterPromptInput, "Character Model Prompt", 88, 360],
-    [characterNotesInput, "Character Consistency Notes", 88, 320],
-    [characterRefsInput, "Style Reference URLs", 88, 320],
-    [styleDescriptionInput, "Style Description", 88, 240],
+    [characterPromptInput, "Character Model Prompt", 100, 460],
+    [characterNotesInput, "Character Consistency Notes", 100, 420],
+    [characterRefsInput, "Style Reference URLs", 100, 420],
+    [styleDescriptionInput, "Style Description", 100, 320],
     [scriptEditor, "Script Panel", 260, 740],
   ];
   staticTextareas.forEach(([node, label, minHeight, maxHeight]) => {
@@ -504,13 +508,31 @@ function renderCharacterRegistry(registryPayload) {
   if (!characterRegistryBox) return;
   const payload = registryPayload && typeof registryPayload === "object" ? registryPayload : {};
   const count = Number(payload.count) || 0;
-  const items = Array.isArray(payload.items) ? payload.items.slice(0, 8) : [];
+  const items = Array.isArray(payload.items) ? payload.items.slice(0, 40) : [];
+  const storyMatches = Array.isArray(payload.story_matches) ? payload.story_matches : [];
+
+  const storyMatchBlock = storyMatches.length
+    ? `
+      <div class="meta-item">
+        <div class="meta-key">Script Matches</div>
+        <div class="meta-value">
+          ${storyMatches
+            .map((item) => `${esc(item.name || "")} (${esc(formatAuditScore(item.audit_score))})`)
+            .join(" • ")}
+        </div>
+      </div>
+    `
+    : "";
 
   characterRegistryBox.innerHTML = `
     <div class="meta-item">
       <div class="meta-key">Character Registry</div>
-      <div class="meta-value">${esc(String(count))} saved model${count === 1 ? "" : "s"}</div>
+      <div class="meta-value">
+        ${esc(String(count))} saved model${count === 1 ? "" : "s"}
+        ${registrySearchTerm ? `<div class="registry-sub">Filter: ${esc(registrySearchTerm)}</div>` : ""}
+      </div>
     </div>
+    ${storyMatchBlock}
     ${
       items.length
         ? `
@@ -534,7 +556,7 @@ function renderCharacterRegistry(registryPayload) {
                         `
                         : `<div class="preview-placeholder">No image</div>`
                     }
-                    <button class="btn btn-sm btn-muted registry-use-btn" data-registry-name="${esc(name)}">Use This Model</button>
+                    <button class="btn btn-sm btn-muted registry-use-btn" data-registry-id="${esc(item.id || "")}" data-registry-name="${esc(name)}">Attach To Story</button>
                   </div>
                 `;
               })
@@ -547,22 +569,19 @@ function renderCharacterRegistry(registryPayload) {
 
   characterRegistryBox.querySelectorAll(".registry-use-btn").forEach((button) => {
     button.addEventListener("click", async () => {
+      const registryId = button.getAttribute("data-registry-id") || "";
       const name = button.getAttribute("data-registry-name") || "";
       try {
-        await requestJson("/api/character/config", {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name }),
-        });
-        const bound = await requestJson("/api/character/auto-bind", {
+        const data = await requestJson("/api/character/attach", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ force: true }),
+          body: JSON.stringify({ registry_id: registryId, name }),
         });
-        if (bound?.bound) {
+        const attached = data?.attached || {};
+        if (attached?.bound) {
           showToast(`Loaded saved model for ${name}`);
         } else {
-          showToast(prettyAutoBindReason(bound?.reason), true);
+          showToast(prettyAutoBindReason(attached?.reason), true);
         }
         await Promise.all([refreshCharacter(), refreshCharacterConfig(), refreshCharacterAudit(), refreshCharacterRegistry()]);
       } catch (err) {
@@ -596,6 +615,7 @@ function renderCharacterConfig(config) {
   const identity = config.character_identity || {};
   const sources = Array.isArray(identity.sources) ? identity.sources : [];
   const registryMatch = config.registry_match || null;
+  const suggestedMatches = Array.isArray(config.suggested_registry_matches) ? config.suggested_registry_matches : [];
   characterPromptPreview.innerHTML = `
     <div class="meta-item">
       <div class="meta-key">Style Guardrail</div>
@@ -618,12 +638,19 @@ function renderCharacterConfig(config) {
             ? `<div class="registry-match-line">Registry match available: ${esc(registryMatch.name || "")} (${esc(formatAuditScore(registryMatch.audit_score))})</div>`
             : ""
         }
+        ${
+          suggestedMatches.length
+            ? `<div class="registry-match-line">Script matches: ${esc(
+                suggestedMatches.map((item) => item.name || "").filter(Boolean).join(", ")
+              )}</div>`
+            : ""
+        }
       </div>
     </div>
   `;
 
   [characterPromptInput, characterNotesInput, characterRefsInput, styleDescriptionInput].forEach((node) =>
-    autoResizeTextarea(node, 88, 360)
+    autoResizeTextarea(node, 100, 460)
   );
 }
 
@@ -664,7 +691,7 @@ function attachSceneEntryHandlers(entries) {
     entry.querySelectorAll("textarea.cell-editor").forEach((textarea) => {
       const field = (textarea.getAttribute("data-field") || "prompt").replaceAll("_", " ");
       const label = `${sceneId || "Scene"} · ${field}`;
-      bindAutoResizeTextarea(textarea, 92, 260);
+      bindAutoResizeTextarea(textarea, 104, 420);
       bindExpandableTextarea(textarea, label);
     });
     const saveBtn = entry.querySelector('[data-action="save"]');
@@ -699,7 +726,7 @@ function attachSceneEntryHandlers(entries) {
         await requestJson(`/api/scenes/${encodeURIComponent(sceneId)}/generate-image`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ dry_run: isDryRun() }),
+          body: JSON.stringify({ dry_run: isDryRun(), provider: providerSelect.value }),
         });
         showToast(`Image job started for ${sceneId}${isDryRun() ? " (dry simulation)" : " (live WaveSpeed)"}`);
         await Promise.all([refreshSceneJobs(), refreshScenes(), refreshCharacter()]);
@@ -713,7 +740,7 @@ function attachSceneEntryHandlers(entries) {
         await requestJson(`/api/scenes/${encodeURIComponent(sceneId)}/generate-video`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ dry_run: isDryRun() }),
+          body: JSON.stringify({ dry_run: isDryRun(), provider: providerSelect.value }),
         });
         showToast(`Video job started for ${sceneId}${isDryRun() ? " (dry simulation)" : " (live WaveSpeed)"}`);
         await Promise.all([refreshSceneJobs(), refreshScenes()]);
@@ -1018,7 +1045,12 @@ async function refreshCharacterAudit() {
 }
 
 async function refreshCharacterRegistry() {
-  const data = await requestJson("/api/character/registry");
+  const search = registrySearchTerm.trim();
+  const query = search ? `?search=${encodeURIComponent(search)}&limit=160` : "?limit=160";
+  const data = await requestJson(`/api/character/registry${query}`);
+  if (characterLibrarySearchInput && document.activeElement !== characterLibrarySearchInput) {
+    characterLibrarySearchInput.value = registrySearchTerm;
+  }
   renderCharacterRegistry(data);
 }
 
@@ -1049,11 +1081,12 @@ refreshBtn.addEventListener("click", async () => {
 
 genCharacterBtn.addEventListener("click", async () => {
   try {
-    const result = await requestJson("/api/character/generate", {
+    const data = await requestJson("/api/character/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dry_run: isDryRun() }),
+      body: JSON.stringify({ dry_run: isDryRun(), provider: providerSelect.value }),
     });
+    const result = data?.result || data || {};
     if (String(result?.task_id || "").startsWith("registry-")) {
       showToast("Loaded saved character model from registry");
     } else {
@@ -1144,11 +1177,12 @@ auditCharacterBtn?.addEventListener("click", async () => {
 
 autoBindCharacterBtn?.addEventListener("click", async () => {
   try {
-    const result = await requestJson("/api/character/auto-bind", {
+    const data = await requestJson("/api/character/auto-bind", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ force: true }),
     });
+    const result = data?.result || data || {};
     if (result?.bound) {
       const record = result.registry_record || {};
       showToast(`Loaded saved model: ${record.name || result.target_name || "character"}`);
@@ -1166,7 +1200,7 @@ genAllImagesBtn.addEventListener("click", async () => {
     const data = await requestJson("/api/scenes/generate-images", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dry_run: isDryRun(), only_missing: true }),
+      body: JSON.stringify({ dry_run: isDryRun(), only_missing: true, provider: providerSelect.value }),
     });
     const count = (data.launched || []).length;
     showToast(`Started ${count} image jobs${isDryRun() ? " (dry simulation)" : " (live WaveSpeed)"}`);
@@ -1181,7 +1215,7 @@ genAllVideosBtn.addEventListener("click", async () => {
     const data = await requestJson("/api/scenes/generate-videos", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dry_run: isDryRun(), only_missing: true }),
+      body: JSON.stringify({ dry_run: isDryRun(), only_missing: true, provider: providerSelect.value }),
     });
     const count = (data.launched || []).length;
     showToast(`Started ${count} video jobs${isDryRun() ? " (dry simulation)" : " (live WaveSpeed)"}`);
@@ -1201,10 +1235,11 @@ runFullTriggerBtn.addEventListener("click", async () => {
         provider: providerSelect.value,
       }),
     });
-    selectedTriggerJobId = data.id;
-    showToast(`Full trigger started: ${data.id}`);
+    const job = data?.job || data || {};
+    selectedTriggerJobId = job.id;
+    showToast(`Full trigger started: ${job.id}`);
     await refreshTriggerJobs();
-    await loadTriggerLog(data.id);
+    await loadTriggerLog(job.id);
   } catch (err) {
     showToast(`Full trigger failed: ${err.message}`, true);
   }
@@ -1230,6 +1265,48 @@ saveScriptBtn.addEventListener("click", async () => {
     await refreshOverview();
   } catch (err) {
     showToast(`Script save failed: ${err.message}`, true);
+  }
+});
+
+characterLibrarySearchBtn?.addEventListener("click", async () => {
+  registrySearchTerm = (characterLibrarySearchInput?.value || "").trim();
+  try {
+    await refreshCharacterRegistry();
+    showToast(registrySearchTerm ? `Filtered library: ${registrySearchTerm}` : "Showing full character library");
+  } catch (err) {
+    showToast(`Library search failed: ${err.message}`, true);
+  }
+});
+
+characterLibrarySearchInput?.addEventListener("keydown", async (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  registrySearchTerm = (characterLibrarySearchInput.value || "").trim();
+  try {
+    await refreshCharacterRegistry();
+    showToast(registrySearchTerm ? `Filtered library: ${registrySearchTerm}` : "Showing full character library");
+  } catch (err) {
+    showToast(`Library search failed: ${err.message}`, true);
+  }
+});
+
+characterAutoMatchBtn?.addEventListener("click", async () => {
+  try {
+    const data = await requestJson("/api/character/auto-match", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force: true }),
+    });
+    const result = data?.result || {};
+    if (result?.bound) {
+      const name = result?.registry_record?.name || result?.target_name || "character";
+      showToast(`Auto-matched character: ${name}`);
+    } else {
+      showToast(prettyAutoBindReason(result?.reason), true);
+    }
+    await Promise.all([refreshCharacter(), refreshCharacterConfig(), refreshScenes(), refreshCharacterRegistry()]);
+  } catch (err) {
+    showToast(`Auto-match failed: ${err.message}`, true);
   }
 });
 

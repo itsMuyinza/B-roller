@@ -3,7 +3,7 @@
 ## Project
 - Name: APRT Script 3 Trigger Deployment
 - Phase: Phase 5 - T (Trigger / Deployment)
-- Last Updated: 2026-02-17
+- Last Updated: 2026-02-18
 - Owner: APRT / Muyinza
 
 ## Data Schema (Data-First Rule)
@@ -179,6 +179,84 @@
 }
 ```
 
+### Run Archive Sync Payload (Airtable + Supabase)
+```json
+{
+  "run_id": "string",
+  "story_id": "string",
+  "archive_source": "scene_image|scene_video|batch_images|batch_videos|character_generate|full_trigger|manual",
+  "mode": "dry_run|live",
+  "provider": "auto|supabase|cloudinary",
+  "status": "pending|running|completed|failed",
+  "started_at": "ISO-8601 UTC",
+  "ended_at": "ISO-8601 UTC|null",
+  "script_text": "full script text used for this run",
+  "character": {
+    "name": "string",
+    "image_url": "https://...",
+    "audit_status": "verified|needs_review|reused|failed|pending"
+  },
+  "scenes": [
+    {
+      "scene_id": "string",
+      "position": 1,
+      "narration": "string",
+      "image_prompt": "string",
+      "motion_prompt": "string",
+      "image_status": "pending|running|completed|failed",
+      "image_url": "https://...|null",
+      "video_status": "pending|running|completed|failed",
+      "video_url": "https://...|null",
+      "updated_at": "ISO-8601 UTC"
+    }
+  ]
+}
+```
+
+### Airtable Scene Row Mapping (One-for-One)
+```json
+{
+  "run_id": "string",
+  "scene_id": "string",
+  "position": 1,
+  "narration": "string",
+  "image_prompt": "string",
+  "motion_prompt": "string",
+  "image_status": "string",
+  "image_url": "https://...",
+  "video_status": "string",
+  "video_url": "https://...",
+  "character_name": "string",
+  "character_image_url": "https://...",
+  "source": "scene_image|scene_video|batch_images|batch_videos|character_generate|full_trigger|manual",
+  "run_tab": "Run_<run_id>"
+}
+```
+
+### Character Library Query and Attach
+```json
+{
+  "query": "string",
+  "items": [
+    {
+      "id": "chr-...",
+      "name": "string",
+      "aliases": ["string"],
+      "image_url": "https://...",
+      "audit_score": 0.0,
+      "audit_status": "verified|needs_review|failed",
+      "last_used_at": "ISO-8601 UTC"
+    }
+  ],
+  "selected_character_id": "chr-...",
+  "attach_result": {
+    "bound": true,
+    "target_name": "string",
+    "registry_record": {}
+  }
+}
+```
+
 ### Scene Grid Record (Editable)
 ```json
 {
@@ -243,6 +321,31 @@
 - Local Cron bootstrap: `tools/install_local_cron.sh`
 
 ## Maintenance Log
+- 2026-02-18:
+  - Added dashboard run-archive persistence layer:
+    - Writes run snapshots per trigger action to local payload files.
+    - Syncs each snapshot to Supabase (`aprt_story_payloads`) and Airtable.
+  - Added Airtable per-run tab flow:
+    - Attempts to create a new run tab (`Run_<run_id>`) and insert one row per scene.
+    - Falls back to configured table id when metadata tab creation is unavailable.
+  - Added Supabase run retrieval merge:
+    - `GET /api/runs` now merges local payload files + Supabase records.
+    - Run detail/download endpoints now resolve local-first with Supabase fallback.
+  - Added character library operations:
+    - Searchable registry endpoint (`/api/character/registry?search=`).
+    - Manual attach endpoint (`POST /api/character/attach`).
+    - Script-driven auto-match endpoint (`POST /api/character/auto-match`).
+  - Improved character auto-consistency behavior:
+    - Story/script registry matches now preferred when inferring target character.
+    - Auto-attach from story invoked during bootstrap, script saves, and scene preflight.
+  - Added UI controls for character library:
+    - `Search Library`, `Match From Script`, and `Attach To Story`.
+    - Expanded textarea defaults for easier long-form prompt editing.
+  - Validation:
+    - Python compile checks passed (`dashboard/app.py`, `api/index.py`).
+    - JS syntax check passed (`dashboard/static/app.js`).
+    - Flask API smoke tests passed for all button-backed endpoints.
+    - Browser automation smoke test (playwright-cli) successfully exercised topbar actions, character controls, and scene row trigger actions.
 - 2026-02-17:
   - Added Phase 5 trigger deployment scaffolding.
   - Added payload schema before coding (Data-First rule satisfied).

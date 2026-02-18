@@ -18,7 +18,8 @@ python3 dashboard/app.py
    - Click `Generate Character Model`.
    - Use `Character Consistency` panel to set character name, style references, and prompt lock before generation.
    - Before generation (or manually), run `Audit Story Character` to search/scrape references and verify candidate identity matches.
-   - If a saved model already exists for that person, use `Auto-Load Saved Character` (or `Use This Model` in registry list).
+   - If a saved model already exists for that person, use `Auto-Load Saved Character`, `Match From Script`, or `Attach To Story` from the character library list.
+   - Use `Search Library` to filter saved characters by name/alias.
 2. Edit prompts:
    - Update scene row prompts directly in the grid.
    - For longer edits, double-click any prompt textarea to open expanded editor modal (`Ctrl/Cmd + Enter` also opens it).
@@ -36,6 +37,11 @@ python3 dashboard/app.py
 6. Monitor queues:
    - Scene Jobs queue for per-scene stages.
    - Full Trigger Jobs queue for full pipeline runs.
+7. Cloud archive:
+   - Every trigger request archives a run snapshot payload to:
+     - Supabase table: `aprt_story_payloads` (or `SUPABASE_RUNS_TABLE` override)
+     - Airtable base: `appHt83YLWsWPVwrM`, default table `tblfyiDWbqjj1JLfs`, with per-run tab creation enabled by default.
+   - Per-run Airtable tab creation can be toggled with `AIRTABLE_CREATE_RUN_TABS=false`.
 
 ## Data Sources
 - Scene records: `dashboard` SQLite table `scenes` in `.tmp/dashboard/dashboard.db`
@@ -47,12 +53,16 @@ python3 dashboard/app.py
 - Full trigger logs: `.tmp/logs/dashboard_trigger_*.log`
 - Script source: `tools/config/script_3_voiceover.md`
 - Character/prompt override source (serverless fallback): `.tmp/dashboard/payload_config_override.json`
+- Supabase run archive: `https://<SUPABASE_PROJECT_ID>.supabase.co/rest/v1/aprt_story_payloads`
+- Airtable run archive: `https://api.airtable.com/v0/appHt83YLWsWPVwrM/*`
 
 ## Character Audit and Reuse API
 - `GET /api/character/audit`
 - `POST /api/character/audit`
 - `GET /api/character/registry`
 - `POST /api/character/auto-bind`
+- `POST /api/character/attach`
+- `POST /api/character/auto-match`
 
 Audit behavior:
 - Searches/scrapes candidate identity sources (`duckduckgo_web`, `wikipedia`, `wikimedia_commons`).
@@ -81,3 +91,6 @@ Audit behavior:
 - Scene-image preflight now enforces character readiness:
   - If no character model exists, it starts character generation and returns a clear wait message.
   - Retry scene-image generation after character status becomes `completed`.
+- Run snapshots now sync on each trigger action:
+  - Scene-level buttons, batch runs, script save, character generation, and full-trigger requests all write run payload snapshots.
+  - Snapshot retrieval merges local payload files with Supabase records in `GET /api/runs`.

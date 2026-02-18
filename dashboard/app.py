@@ -16,7 +16,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import requests
 import yaml
@@ -70,6 +70,10 @@ REFERENCE_USAGE_GUARDRAIL = (
     "never for copying characters."
 )
 SERVERLESS_ENV_KEYS = ("VERCEL", "NOW_REGION", "AWS_REGION")
+DEFAULT_AIRTABLE_BASE_ID = "appHt83YLWsWPVwrM"
+DEFAULT_AIRTABLE_TABLE_ID = "tblfyiDWbqjj1JLfs"
+DEFAULT_SUPABASE_RUN_TABLE = "aprt_story_payloads"
+AIRTABLE_API_BASE = "https://api.airtable.com/v0"
 
 
 class DashboardError(RuntimeError):
@@ -90,6 +94,79 @@ def is_simulated_url(url: str) -> bool:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def parse_bool_env(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def parse_timestamp(value: Any) -> datetime:
+    text = str(value or "").strip()
+    if not text:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+    normalized = text.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def get_supabase_project_id() -> str:
+    project_id = str(os.getenv("SUPABASE_PROJECT_ID", "")).strip()
+    if project_id:
+        return project_id
+    supabase_url = str(os.getenv("SUPABASE_URL", "")).strip()
+    match = re.search(r"https://([a-z0-9-]+)\.supabase\.co", supabase_url, flags=re.IGNORECASE)
+    return match.group(1) if match else ""
+
+
+def get_supabase_service_key() -> str:
+    for key in (
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "SUPABASE_SECRET_KEY",
+        "SUPABASE_SERVICE_KEY",
+    ):
+        value = str(os.getenv(key, "")).strip()
+        if value:
+            return value
+    return ""
+
+
+def get_supabase_runs_table() -> str:
+    table = str(os.getenv("SUPABASE_RUNS_TABLE", "")).strip()
+    return table or DEFAULT_SUPABASE_RUN_TABLE
+
+
+def get_airtable_token() -> str:
+    for key in ("AIRTABLE_API_KEY", "AIRTABLE_PAT", "AIRTABLE_TOKEN"):
+        value = str(os.getenv(key, "")).strip()
+        if value:
+            return value
+    return ""
+
+
+def get_airtable_base_id() -> str:
+    base_id = str(os.getenv("AIRTABLE_BASE_ID", "")).strip()
+    return base_id or DEFAULT_AIRTABLE_BASE_ID
+
+
+def get_airtable_table_id() -> str:
+    table_id = str(os.getenv("AIRTABLE_TABLE_ID", "")).strip()
+    return table_id or DEFAULT_AIRTABLE_TABLE_ID
+
+
+def should_create_airtable_run_tabs() -> bool:
+    return parse_bool_env("AIRTABLE_CREATE_RUN_TABS", True)
 
 
 def load_env_file(path: pathlib.Path) -> None:
@@ -452,6 +529,8 @@ def get_character_config() -> Dict[str, Any]:
     )
     inferred_target = infer_story_target_character_name()
     registry_match = get_character_registry_record_by_name(inferred_target) if inferred_target else None
+    story_text = str(collect_story_context().get("merged_text", ""))
+    suggested_matches = find_story_registry_candidates(story_text, limit=5)
     return {
         "name": name,
         "character_model_prompt": model_prompt,
@@ -471,6 +550,16 @@ def get_character_config() -> Dict[str, Any]:
         }
         if isinstance(registry_match, dict)
         else None,
+        "suggested_registry_matches": [
+            {
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "image_url": item.get("image_url"),
+                "audit_score": item.get("audit_score"),
+                "audit_status": item.get("audit_status"),
+            }
+            for item in suggested_matches
+        ],
     }
 
 
@@ -734,6 +823,10 @@ def bootstrap_once() -> None:
         if character_name:
             enforce_scene_prompts_with_character_name(character_name, style_description, persist_payload=False)
             backfill_registry_from_current_character_state()
+        try:
+            auto_attach_character_from_story(force=False)
+        except Exception:
+            pass
         BOOTSTRAPPED = True
 
 
@@ -997,7 +1090,7 @@ def summarize_payload(path: pathlib.Path) -> Optional[Dict[str, Any]]:
     }
 
 
-def list_runs(limit: int = 140) -> List[Dict[str, Any]]:
+def list_local_runs(limit: int = 140) -> List[Dict[str, Any]]:
     if not RUN_DIR.exists():
         return []
     payloads = sorted(RUN_DIR.glob("payload_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -1009,7 +1102,7 @@ def list_runs(limit: int = 140) -> List[Dict[str, Any]]:
     return out
 
 
-def read_payload_by_run_id(run_id: str) -> Optional[Dict[str, Any]]:
+def read_local_payload_by_run_id(run_id: str) -> Optional[Dict[str, Any]]:
     if not RUN_DIR.exists():
         return None
     for path in RUN_DIR.glob("payload_*.json"):
@@ -1020,6 +1113,515 @@ def read_payload_by_run_id(run_id: str) -> Optional[Dict[str, Any]]:
         if data.get("run_id") == run_id:
             return data
     return None
+
+
+def supabase_api_request(
+    method: str,
+    table: str,
+    *,
+    params: Optional[Dict[str, Any]] = None,
+    json_body: Optional[Any] = None,
+    timeout: int = 35,
+) -> Optional[requests.Response]:
+    project_id = get_supabase_project_id()
+    service_key = get_supabase_service_key()
+    if not project_id or not service_key:
+        return None
+
+    endpoint = f"https://{project_id}.supabase.co/rest/v1/{table}"
+    headers = {
+        "apikey": service_key,
+        "Authorization": f"Bearer {service_key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation,resolution=merge-duplicates",
+    }
+    response = requests.request(
+        method=method,
+        url=endpoint,
+        headers=headers,
+        params=params,
+        json=json_body,
+        timeout=timeout,
+    )
+    return response
+
+
+def summarize_supabase_row(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    payload = row.get("payload")
+    payload_obj = payload if isinstance(payload, dict) else parse_json_or_default(payload, {})
+    if not isinstance(payload_obj, dict):
+        payload_obj = {}
+
+    run = payload_obj.get("run", {}) if isinstance(payload_obj.get("run"), dict) else {}
+    cloud = payload_obj.get("cloud_transfer", {}) if isinstance(payload_obj.get("cloud_transfer"), dict) else {}
+    scenes = payload_obj.get("scenes", [])
+    generated_at = (
+        row.get("generated_at")
+        or row.get("created_at")
+        or payload_obj.get("run", {}).get("ended_at")
+        or payload_obj.get("run", {}).get("started_at")
+        or utc_now()
+    )
+    run_id = str(row.get("run_id") or payload_obj.get("run_id") or "").strip()
+    if not run_id:
+        return None
+
+    return {
+        "run_id": run_id,
+        "story_id": row.get("story_id") or payload_obj.get("story_id", ""),
+        "status": row.get("status") or payload_obj.get("status", "unknown"),
+        "scene_count": len(scenes) if isinstance(scenes, list) else 0,
+        "started_at": run.get("started_at"),
+        "ended_at": run.get("ended_at"),
+        "cloud_provider": cloud.get("provider") or "supabase",
+        "cloud_status": cloud.get("status") or "success",
+        "cloud_destination": cloud.get("destination") or "supabase",
+        "payload_path": "",
+        "updated_at": str(generated_at),
+        "source": "supabase",
+    }
+
+
+def list_supabase_runs(limit: int = 140) -> List[Dict[str, Any]]:
+    table = get_supabase_runs_table()
+    response = supabase_api_request(
+        "GET",
+        table,
+        params={
+            "select": "run_id,story_id,status,generated_at,payload,created_at",
+            "order": "generated_at.desc",
+            "limit": str(limit),
+        },
+    )
+    if response is None or not response.ok:
+        return []
+    try:
+        rows = response.json()
+    except ValueError:
+        return []
+    if not isinstance(rows, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        summary = summarize_supabase_row(row)
+        if summary:
+            out.append(summary)
+    return out
+
+
+def read_supabase_payload_by_run_id(run_id: str) -> Optional[Dict[str, Any]]:
+    table = get_supabase_runs_table()
+    response = supabase_api_request(
+        "GET",
+        table,
+        params={
+            "select": "run_id,payload",
+            "run_id": f"eq.{run_id}",
+            "limit": "1",
+        },
+    )
+    if response is None or not response.ok:
+        return None
+    try:
+        rows = response.json()
+    except ValueError:
+        return None
+    if not isinstance(rows, list) or not rows:
+        return None
+    row = rows[0]
+    if not isinstance(row, dict):
+        return None
+    payload = row.get("payload")
+    if isinstance(payload, dict):
+        return payload
+    parsed = parse_json_or_default(payload, {})
+    return parsed if isinstance(parsed, dict) else None
+
+
+def merge_run_summaries(local: List[Dict[str, Any]], remote: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+    merged: Dict[str, Dict[str, Any]] = {}
+    for source in local + remote:
+        run_id = str(source.get("run_id", "")).strip()
+        if not run_id:
+            continue
+        current = merged.get(run_id)
+        if current is None:
+            merged[run_id] = dict(source)
+            continue
+        if parse_timestamp(source.get("updated_at")) > parse_timestamp(current.get("updated_at")):
+            merged[run_id] = {**current, **source}
+        else:
+            merged[run_id] = {**source, **current}
+    ordered = sorted(merged.values(), key=lambda item: parse_timestamp(item.get("updated_at")), reverse=True)
+    return ordered[:limit]
+
+
+def list_runs(limit: int = 140) -> List[Dict[str, Any]]:
+    local_runs = list_local_runs(limit=limit)
+    remote_runs = list_supabase_runs(limit=limit)
+    return merge_run_summaries(local_runs, remote_runs, limit=limit)
+
+
+def read_payload_by_run_id(run_id: str) -> Optional[Dict[str, Any]]:
+    local_payload = read_local_payload_by_run_id(run_id)
+    if local_payload is not None:
+        return local_payload
+    return read_supabase_payload_by_run_id(run_id)
+
+
+def chunked(items: List[Any], size: int) -> Iterable[List[Any]]:
+    for idx in range(0, len(items), size):
+        yield items[idx : idx + size]
+
+
+def derive_run_status(scenes: List[Dict[str, Any]], character_state: Dict[str, Any]) -> str:
+    if any(
+        str(scene.get("image_status", "")).lower() == "failed" or str(scene.get("video_status", "")).lower() == "failed"
+        for scene in scenes
+    ):
+        return "failed"
+    if str(character_state.get("status", "")).lower() == "failed":
+        return "failed"
+    if scenes and all(
+        str(scene.get("image_status", "")).lower() == "completed" and str(scene.get("video_status", "")).lower() == "completed"
+        for scene in scenes
+    ):
+        return "completed"
+    if any(
+        str(scene.get("image_status", "")).lower() == "running" or str(scene.get("video_status", "")).lower() == "running"
+        for scene in scenes
+    ):
+        return "running"
+    if str(character_state.get("status", "")).lower() == "running":
+        return "running"
+    if any(
+        str(scene.get("image_status", "")).lower() == "completed" or str(scene.get("video_status", "")).lower() == "completed"
+        for scene in scenes
+    ):
+        return "running"
+    return "pending"
+
+
+def build_dashboard_run_snapshot(
+    *,
+    source: str,
+    mode: str,
+    provider: str,
+    run_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    config = load_payload_config()
+    scenes = list_scenes()
+    script_panel = read_script_panel()
+    character_state = get_character_state()
+    character_cfg = get_character_config()
+    audit_state = get_character_audit_state()
+
+    now = utc_now()
+    resolved_run_id = run_id or f"dash-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:6]}"
+    status = derive_run_status(scenes, character_state)
+    ended_at = now if status in {"completed", "failed"} else None
+    scene_rows: List[Dict[str, Any]] = []
+    for scene in scenes:
+        scene_rows.append(
+            {
+                "scene_id": scene.get("scene_id"),
+                "position": scene.get("position"),
+                "narration": scene.get("narration", ""),
+                "image_prompt": scene.get("image_prompt", ""),
+                "motion_prompt": scene.get("motion_prompt", ""),
+                "image_status": scene.get("image_status", "pending"),
+                "image_task_id": scene.get("image_task_id"),
+                "image_url": scene.get("image_url"),
+                "video_status": scene.get("video_status", "pending"),
+                "video_task_id": scene.get("video_task_id"),
+                "video_url": scene.get("video_url"),
+                "last_error": scene.get("last_error"),
+                "updated_at": scene.get("updated_at"),
+            }
+        )
+
+    snapshot = {
+        "run_id": resolved_run_id,
+        "story_id": str(config.get("story_id", "")).strip(),
+        "title": str(config.get("title", "")).strip(),
+        "status": status,
+        "run": {
+            "started_at": now,
+            "ended_at": ended_at,
+            "mode": mode,
+            "provider": provider,
+            "source": source,
+        },
+        "archive": {
+            "source": source,
+            "mode": mode,
+            "provider": provider,
+            "created_at": now,
+        },
+        "script_panel": {
+            "script_path": script_panel.get("script_path", ""),
+            "script_text": script_panel.get("script_text", ""),
+        },
+        "character_model": {
+            "status": character_state.get("status", "pending"),
+            "task_id": character_state.get("task_id"),
+            "image_url": character_state.get("image_url"),
+            "source": character_state.get("source"),
+            "registry_id": character_state.get("registry_id"),
+            "name": character_cfg.get("name", ""),
+            "style_description": character_cfg.get("style_description", ""),
+            "identity_audit": audit_state,
+        },
+        "scenes": scene_rows,
+        "cloud_transfer": {
+            "provider": provider,
+            "status": "pending",
+            "destination": "",
+            "transferred_at": "",
+            "supabase": {},
+            "airtable": {},
+        },
+        "errors": [],
+    }
+    return snapshot
+
+
+def write_run_snapshot(snapshot: Dict[str, Any]) -> pathlib.Path:
+    run_id = str(snapshot.get("run_id", "")).strip() or f"dash-{uuid.uuid4().hex[:8]}"
+    safe_run_id = re.sub(r"[^A-Za-z0-9._-]+", "_", run_id)
+    path = RUN_DIR / f"payload_{safe_run_id}.json"
+    path.write_text(json.dumps(snapshot, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    return path
+
+
+def sync_snapshot_to_supabase(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    table = get_supabase_runs_table()
+    row = {
+        "run_id": snapshot.get("run_id"),
+        "story_id": snapshot.get("story_id"),
+        "status": snapshot.get("status"),
+        "generated_at": snapshot.get("run", {}).get("ended_at") or snapshot.get("run", {}).get("started_at") or utc_now(),
+        "payload": snapshot,
+    }
+    response = supabase_api_request("POST", table, json_body=[row], timeout=50)
+    if response is None:
+        return {
+            "provider": "supabase",
+            "status": "failed",
+            "destination": table,
+            "message": "Missing Supabase credentials (project id/service key).",
+        }
+    if not response.ok:
+        detail = (response.text or "").strip()
+        if len(detail) > 700:
+            detail = detail[:700] + "..."
+        return {
+            "provider": "supabase",
+            "status": "failed",
+            "destination": table,
+            "message": f"Supabase write failed ({response.status_code}): {detail}",
+        }
+    return {
+        "provider": "supabase",
+        "status": "success",
+        "destination": table,
+        "message": "Run payload archived to Supabase.",
+    }
+
+
+def create_airtable_run_table(base_id: str, token: str, table_name: str) -> Dict[str, Any]:
+    fields = [
+        {"name": "run_id", "type": "singleLineText"},
+        {"name": "story_id", "type": "singleLineText"},
+        {"name": "scene_id", "type": "singleLineText"},
+        {"name": "position", "type": "number", "options": {"precision": 0}},
+        {"name": "narration", "type": "multilineText"},
+        {"name": "image_prompt", "type": "multilineText"},
+        {"name": "motion_prompt", "type": "multilineText"},
+        {"name": "image_status", "type": "singleLineText"},
+        {"name": "image_url", "type": "url"},
+        {"name": "video_status", "type": "singleLineText"},
+        {"name": "video_url", "type": "url"},
+        {"name": "character_name", "type": "singleLineText"},
+        {"name": "character_image_url", "type": "url"},
+        {"name": "source", "type": "singleLineText"},
+        {"name": "updated_at", "type": "singleLineText"},
+    ]
+    response = requests.post(
+        f"{AIRTABLE_API_BASE}/meta/bases/{base_id}/tables",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json={"name": table_name, "fields": fields},
+        timeout=35,
+    )
+    if not response.ok:
+        return {
+            "ok": False,
+            "message": f"Create table failed ({response.status_code}): {(response.text or '').strip()[:400]}",
+        }
+    payload = response.json() if response.content else {}
+    return {
+        "ok": True,
+        "table_id": payload.get("id") or table_name,
+        "table_name": payload.get("name") or table_name,
+        "message": "Created run tab in Airtable.",
+    }
+
+
+def sync_snapshot_to_airtable(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    token = get_airtable_token()
+    base_id = get_airtable_base_id()
+    fallback_table = get_airtable_table_id()
+    if not token:
+        return {
+            "provider": "airtable",
+            "status": "failed",
+            "destination": fallback_table,
+            "message": "Missing Airtable API token.",
+        }
+
+    run_id = str(snapshot.get("run_id", "")).strip() or f"dash-{uuid.uuid4().hex[:6]}"
+    run_tab_name = f"Run_{re.sub(r'[^A-Za-z0-9_]+', '_', run_id)[:48]}"
+    target_table = fallback_table
+    create_result: Dict[str, Any] = {"ok": False}
+    if should_create_airtable_run_tabs():
+        create_result = create_airtable_run_table(base_id, token, run_tab_name)
+        if create_result.get("ok"):
+            target_table = str(create_result.get("table_id") or run_tab_name)
+
+    scenes = snapshot.get("scenes", [])
+    if not isinstance(scenes, list):
+        scenes = []
+    character = snapshot.get("character_model", {}) if isinstance(snapshot.get("character_model"), dict) else {}
+    character_name = str(character.get("name", "")).strip()
+    character_image_url = str(character.get("image_url", "")).strip()
+    source = str(snapshot.get("archive", {}).get("source", "")).strip()
+    story_id = str(snapshot.get("story_id", "")).strip()
+
+    records: List[Dict[str, Any]] = []
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        fields = {
+            "run_id": run_id,
+            "story_id": story_id,
+            "scene_id": str(scene.get("scene_id", "")),
+            "position": scene.get("position"),
+            "narration": str(scene.get("narration", "")),
+            "image_prompt": str(scene.get("image_prompt", "")),
+            "motion_prompt": str(scene.get("motion_prompt", "")),
+            "image_status": str(scene.get("image_status", "pending")),
+            "image_url": str(scene.get("image_url", "") or ""),
+            "video_status": str(scene.get("video_status", "pending")),
+            "video_url": str(scene.get("video_url", "") or ""),
+            "character_name": character_name,
+            "character_image_url": character_image_url,
+            "source": source,
+            "updated_at": str(scene.get("updated_at", "")),
+        }
+        records.append({"fields": fields})
+
+    if not records:
+        records.append(
+            {
+                "fields": {
+                    "run_id": run_id,
+                    "story_id": story_id,
+                    "scene_id": "none",
+                    "position": 0,
+                    "narration": "",
+                    "image_prompt": "",
+                    "motion_prompt": "",
+                    "image_status": "pending",
+                    "image_url": "",
+                    "video_status": "pending",
+                    "video_url": "",
+                    "character_name": character_name,
+                    "character_image_url": character_image_url,
+                    "source": source,
+                    "updated_at": utc_now(),
+                }
+            }
+        )
+
+    endpoint = f"{AIRTABLE_API_BASE}/{base_id}/{quote(target_table, safe='')}"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    inserted = 0
+    for batch in chunked(records, 10):
+        response = requests.post(
+            endpoint,
+            headers=headers,
+            json={"records": batch, "typecast": True},
+            timeout=35,
+        )
+        if not response.ok:
+            detail = (response.text or "").strip()
+            if len(detail) > 700:
+                detail = detail[:700] + "..."
+            return {
+                "provider": "airtable",
+                "status": "failed",
+                "destination": target_table,
+                "message": f"Airtable write failed ({response.status_code}): {detail}",
+                "run_tab": run_tab_name,
+                "create_table": create_result,
+            }
+        payload = response.json() if response.content else {}
+        batch_records = payload.get("records", []) if isinstance(payload, dict) else []
+        inserted += len(batch_records) if isinstance(batch_records, list) else len(batch)
+
+    return {
+        "provider": "airtable",
+        "status": "success",
+        "destination": target_table,
+        "message": "Run scene rows synced to Airtable.",
+        "inserted_records": inserted,
+        "run_tab": run_tab_name,
+        "create_table": create_result,
+    }
+
+
+def archive_dashboard_run(
+    *,
+    source: str,
+    mode: str,
+    provider: str,
+    run_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    snapshot = build_dashboard_run_snapshot(source=source, mode=mode, provider=provider, run_id=run_id)
+    payload_path = write_run_snapshot(snapshot)
+    supabase_result = sync_snapshot_to_supabase(snapshot)
+    airtable_result = sync_snapshot_to_airtable(snapshot)
+
+    results = [supabase_result, airtable_result]
+    success_count = sum(1 for item in results if str(item.get("status", "")).lower() == "success")
+    overall_status = "success" if success_count == len(results) else ("partial" if success_count > 0 else "failed")
+    destination_parts = [
+        f"{item.get('provider')}:{item.get('destination')}" for item in results if str(item.get("destination", "")).strip()
+    ]
+    snapshot["cloud_transfer"] = {
+        "provider": provider,
+        "status": overall_status,
+        "destination": " | ".join(destination_parts),
+        "transferred_at": utc_now(),
+        "supabase": supabase_result,
+        "airtable": airtable_result,
+    }
+    if overall_status != "success":
+        snapshot.setdefault("errors", []).append(
+            {
+                "stage": "cloud_transfer",
+                "message": " ; ".join([str(item.get("message", "")) for item in results if item.get("status") != "success"]),
+            }
+        )
+    payload_path.write_text(json.dumps(snapshot, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    return {
+        "run_id": snapshot.get("run_id"),
+        "payload_path": str(payload_path.resolve()),
+        "status": snapshot.get("status"),
+        "cloud_transfer": snapshot.get("cloud_transfer", {}),
+    }
 
 
 def load_workflow_crons() -> List[str]:
@@ -1198,12 +1800,51 @@ def extract_story_person_candidates(text: str, max_names: int = 10) -> List[str]
     return candidates[:max_names]
 
 
+def find_story_registry_candidates(text: str, limit: int = 6) -> List[Dict[str, Any]]:
+    merged = str(text or "").strip()
+    if not merged:
+        return []
+    normalized_story = normalize_name_key(merged)
+    if not normalized_story:
+        return []
+
+    ranked: List[Tuple[float, Dict[str, Any]]] = []
+    for record in list_character_registry(limit=400):
+        name = str(record.get("name", "")).strip()
+        if not name:
+            continue
+        variants = [name]
+        aliases = record.get("aliases", [])
+        if isinstance(aliases, list):
+            variants.extend([str(alias).strip() for alias in aliases if str(alias).strip()])
+
+        best = 0.0
+        for variant in variants:
+            key = normalize_name_key(variant)
+            if not key:
+                continue
+            if key in normalized_story:
+                boost = max(0.0, float(record.get("audit_score", 0.0)) * 0.1)
+                best = max(best, 1.0 + boost)
+        if best > 0:
+            ranked.append((best, record))
+
+    ranked.sort(key=lambda item: (item[0], str(item[1].get("last_used_at", ""))), reverse=True)
+    return [item[1] for item in ranked[:limit]]
+
+
 def infer_story_target_character_name() -> str:
     context = collect_story_context()
     existing = str(context.get("character_name", "")).strip()
     if existing:
         return existing
+    registry_matches = find_story_registry_candidates(str(context.get("merged_text", "")), limit=1)
+    if registry_matches:
+        return str(registry_matches[0].get("name", "")).strip()
     candidates = extract_story_person_candidates(str(context.get("merged_text", "")))
+    for candidate in candidates:
+        if get_character_registry_record_by_name(candidate):
+            return candidate
     return candidates[0] if candidates else ""
 
 
@@ -1218,18 +1859,34 @@ def get_character_audit_state() -> Dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def list_character_registry(limit: int = 60) -> List[Dict[str, Any]]:
+def list_character_registry(limit: int = 60, search: str = "") -> List[Dict[str, Any]]:
+    search_text = str(search or "").strip()
+    search_pattern = f"%{search_text}%"
     with db_conn() as conn:
-        rows = conn.execute(
-            """
-            select id, name, name_key, aliases, image_url, source_url, source_label,
-                   audit_score, audit_status, audit_log, created_at, updated_at, last_used_at
-            from character_registry
-            order by last_used_at desc, updated_at desc
-            limit ?
-            """,
-            (limit,),
-        ).fetchall()
+        if search_text:
+            rows = conn.execute(
+                """
+                select id, name, name_key, aliases, image_url, source_url, source_label,
+                       audit_score, audit_status, audit_log, created_at, updated_at, last_used_at
+                from character_registry
+                where name like ? collate nocase
+                   or aliases like ? collate nocase
+                order by last_used_at desc, updated_at desc
+                limit ?
+                """,
+                (search_pattern, search_pattern, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                select id, name, name_key, aliases, image_url, source_url, source_label,
+                       audit_score, audit_status, audit_log, created_at, updated_at, last_used_at
+                from character_registry
+                order by last_used_at desc, updated_at desc
+                limit ?
+                """,
+                (limit,),
+            ).fetchall()
     items: List[Dict[str, Any]] = []
     for row in rows:
         item = dict(row)
@@ -1243,6 +1900,29 @@ def count_character_registry() -> int:
     with db_conn() as conn:
         row = conn.execute("select count(1) as n from character_registry").fetchone()
     return int(row["n"]) if row is not None else 0
+
+
+def get_character_registry_record_by_id(record_id: str) -> Optional[Dict[str, Any]]:
+    target = str(record_id or "").strip()
+    if not target:
+        return None
+    with db_conn() as conn:
+        row = conn.execute(
+            """
+            select id, name, name_key, aliases, image_url, source_url, source_label,
+                   audit_score, audit_status, audit_log, created_at, updated_at, last_used_at
+            from character_registry
+            where id = ?
+            limit 1
+            """,
+            (target,),
+        ).fetchone()
+    if row is None:
+        return None
+    record = dict(row)
+    record["aliases"] = parse_json_or_default(record.get("aliases", "[]"), [])
+    record["audit_log"] = parse_json_or_default(record.get("audit_log", "{}"), {})
+    return record
 
 
 def get_character_registry_record_by_name(name: str) -> Optional[Dict[str, Any]]:
@@ -1839,6 +2519,82 @@ def auto_bind_character_from_registry(force: bool = False) -> Dict[str, Any]:
     }
 
 
+def attach_character_record_to_story(
+    record: Dict[str, Any],
+    *,
+    reason: str,
+    force: bool = True,
+) -> Dict[str, Any]:
+    name = str(record.get("name", "")).strip()
+    image_url = str(record.get("image_url", "")).strip()
+    if not name or not image_url:
+        raise DashboardError("Character record is missing required name/image fields.")
+
+    config = load_payload_config()
+    character = config.get("character", {}) if isinstance(config.get("character"), dict) else {}
+    character["name"] = name
+    config["character"] = character
+    save_payload_config(config)
+
+    style_description = get_style_description_from_config(config)
+    normalized = enforce_scene_prompts_with_character_name(name, style_description, persist_payload=True)
+
+    update_character_state(
+        status="completed",
+        task_id=f"registry-{record['id']}",
+        image_url=image_url,
+        last_error=None,
+    )
+    mark_character_registry_used(record["id"])
+    audit_state = {
+        "target_name": name,
+        "status": "reused",
+        "score": float(record.get("audit_score", 0)),
+        "selected_reference_images": [image_url],
+        "selected_source_urls": [str(record.get("source_url", ""))] if str(record.get("source_url", "")).strip() else [],
+        "candidates": [],
+        "requested_at": utc_now(),
+        "story_id": str(load_payload_config().get("story_id", "")).strip(),
+        "registry_id": record["id"],
+        "reason": reason,
+        "force": bool(force),
+    }
+    set_character_audit_state(audit_state)
+
+    return {
+        "bound": True,
+        "target_name": name,
+        "registry_record": record,
+        "normalized_prompts": normalized,
+    }
+
+
+def auto_attach_character_from_story(force: bool = False) -> Dict[str, Any]:
+    context = collect_story_context()
+    merged_text = str(context.get("merged_text", ""))
+    script_matches = find_story_registry_candidates(merged_text, limit=1)
+    candidate_name = ""
+    if script_matches:
+        candidate_name = str(script_matches[0].get("name", "")).strip()
+    if not candidate_name:
+        candidate_name = infer_story_target_character_name()
+    if not candidate_name:
+        return {"bound": False, "reason": "no_story_character_detected"}
+
+    record = get_character_registry_record_by_name(candidate_name)
+    if record is None:
+        return {"bound": False, "reason": "no_registry_match", "target_name": candidate_name}
+
+    state = get_character_state()
+    existing_image = str(state.get("image_url", "")).strip()
+    if existing_image and existing_image != str(record.get("image_url", "")).strip() and not force:
+        return {"bound": False, "reason": "character_image_already_set", "target_name": candidate_name}
+
+    result = attach_character_record_to_story(record, reason="auto_match_from_script", force=force)
+    result["target_name"] = candidate_name
+    return result
+
+
 def save_character_to_registry_from_state(image_url: str, source: str) -> Optional[Dict[str, Any]]:
     if not str(image_url or "").strip():
         return None
@@ -2202,6 +2958,10 @@ def refresh_character_state_from_provider() -> None:
             image_url = choose_primary_url(urls, kind="image")
             update_character_state(status="completed", task_id=task_id, image_url=image_url, last_error=None)
             save_character_to_registry_from_state(image_url=image_url, source="generated")
+            try:
+                archive_dashboard_run(source="character_generate", mode="live", provider="auto")
+            except Exception:
+                pass
         elif status in FAIL_STATUSES:
             update_character_state(
                 status="failed",
@@ -2209,6 +2969,10 @@ def refresh_character_state_from_provider() -> None:
                 image_url=None,
                 last_error=extract_error_message(payload),
             )
+            try:
+                archive_dashboard_run(source="character_failed", mode="live", provider="auto")
+            except Exception:
+                pass
     except Exception:
         return
 
@@ -2255,6 +3019,10 @@ def refresh_running_scene_jobs_from_provider(max_jobs: int = 10) -> None:
                 else:
                     update_scene_fields(scene_id, {"video_status": "failed", "last_error": msg})
                 update_scene_job(job_id, status="failed", task_id=task_id, error=msg)
+                try:
+                    archive_dashboard_run(source=f"{stage}_failed", mode="live", provider="auto")
+                except Exception:
+                    pass
                 continue
 
             if stage == "image":
@@ -2281,6 +3049,10 @@ def refresh_running_scene_jobs_from_provider(max_jobs: int = 10) -> None:
                     },
                 )
             update_scene_job(job_id, status="completed", task_id=task_id, result_url=url, error=None)
+            try:
+                archive_dashboard_run(source=f"scene_{stage}", mode="live", provider="auto")
+            except Exception:
+                pass
             continue
 
         if status in FAIL_STATUSES:
@@ -2290,6 +3062,10 @@ def refresh_running_scene_jobs_from_provider(max_jobs: int = 10) -> None:
             else:
                 update_scene_fields(scene_id, {"video_status": "failed", "last_error": msg})
             update_scene_job(job_id, status="failed", task_id=task_id, error=msg)
+            try:
+                archive_dashboard_run(source=f"{stage}_failed", mode="live", provider="auto")
+            except Exception:
+                pass
 
 
 def get_style_reference_urls(dry_run: bool, client: Optional[WaveSpeedClient]) -> List[str]:
@@ -2305,7 +3081,7 @@ def get_style_reference_urls(dry_run: bool, client: Optional[WaveSpeedClient]) -
 def preflight_character_for_scene_images(*, dry_run: bool) -> None:
     if dry_run:
         return
-    auto_bind_character_from_registry(force=False)
+    auto_attach_character_from_story(force=False)
     refresh_character_state_from_provider()
     state = get_character_state()
     image_url = str(state.get("image_url") or "").strip()
@@ -2343,7 +3119,7 @@ def generate_character_model(dry_run: bool, submit_only: bool = False) -> Dict[s
     style_description = get_style_description_from_config(config)
 
     # If this story already has a saved character model, reuse it instantly.
-    reuse = auto_bind_character_from_registry(force=False)
+    reuse = auto_attach_character_from_story(force=False)
     if reuse.get("bound"):
         record = reuse.get("registry_record", {}) if isinstance(reuse.get("registry_record"), dict) else {}
         return {
@@ -2590,6 +3366,14 @@ def run_scene_job(job_id: str, scene_id: str, stage: str, dry_run: bool) -> None
                 result_url=result["url"],
                 error=None,
             )
+            try:
+                archive_dashboard_run(
+                    source="scene_image",
+                    mode="dry_run" if dry_run else "live",
+                    provider="auto",
+                )
+            except Exception:
+                pass
             return
 
         if stage == "video":
@@ -2610,6 +3394,14 @@ def run_scene_job(job_id: str, scene_id: str, stage: str, dry_run: bool) -> None
                 result_url=result["url"],
                 error=None,
             )
+            try:
+                archive_dashboard_run(
+                    source="scene_video",
+                    mode="dry_run" if dry_run else "live",
+                    provider="auto",
+                )
+            except Exception:
+                pass
             return
 
         raise DashboardError(f"Unsupported stage: {stage}")
@@ -2620,6 +3412,14 @@ def run_scene_job(job_id: str, scene_id: str, stage: str, dry_run: bool) -> None
         elif stage == "video":
             update_scene_fields(scene_id, {"video_status": "failed", "last_error": msg})
         update_scene_job(job_id, status="failed", error=msg)
+        try:
+            archive_dashboard_run(
+                source=f"{stage}_failed",
+                mode="dry_run" if dry_run else "live",
+                provider="auto",
+            )
+        except Exception:
+            pass
     finally:
         with ACTIVE_SCENE_LOCK:
             ACTIVE_SCENE_JOBS.pop(key, None)
@@ -2781,7 +3581,7 @@ def api_overview() -> Any:
     reconcile_provider_jobs()
     backfill_registry_from_current_character_state()
     try:
-        auto_bind_character_from_registry(force=False)
+        auto_attach_character_from_story(force=False)
     except Exception:
         pass
     registry_items = list_character_registry(limit=8)
@@ -2810,6 +3610,8 @@ def api_overview() -> Any:
             "runtime": {
                 "serverless": is_serverless_runtime(),
                 "wavespeed_configured": bool(os.getenv("WAVESPEED_API_KEY", "").strip()),
+                "supabase_configured": bool(get_supabase_project_id() and get_supabase_service_key()),
+                "airtable_configured": bool(get_airtable_token()),
             },
             "active_trigger_jobs": len(ACTIVE_TRIGGER_JOBS),
             "active_scene_jobs": len(ACTIVE_SCENE_JOBS),
@@ -2882,12 +3684,22 @@ def api_generate_scene_image(scene_id: str) -> Any:
     bootstrap_once()
     payload = request.get_json(silent=True) or {}
     dry_run = bool(payload.get("dry_run", False))
+    provider = str(payload.get("provider", "auto")).strip().lower() or "auto"
     try:
         preflight_character_for_scene_images(dry_run=dry_run)
         job = start_scene_job(scene_id, stage="image", dry_run=dry_run)
     except DashboardError as exc:
         return jsonify({"error": str(exc)}), 400
-    return jsonify(job), 202
+    archive = None
+    try:
+        archive = archive_dashboard_run(
+            source="scene_image_request",
+            mode="dry_run" if dry_run else "live",
+            provider=provider,
+        )
+    except Exception:
+        archive = None
+    return jsonify({"job": job, "archive": archive}), 202
 
 
 @app.post("/api/scenes/<scene_id>/generate-video")
@@ -2895,11 +3707,21 @@ def api_generate_scene_video(scene_id: str) -> Any:
     bootstrap_once()
     payload = request.get_json(silent=True) or {}
     dry_run = bool(payload.get("dry_run", False))
+    provider = str(payload.get("provider", "auto")).strip().lower() or "auto"
     try:
         job = start_scene_job(scene_id, stage="video", dry_run=dry_run)
     except DashboardError as exc:
         return jsonify({"error": str(exc)}), 400
-    return jsonify(job), 202
+    archive = None
+    try:
+        archive = archive_dashboard_run(
+            source="scene_video_request",
+            mode="dry_run" if dry_run else "live",
+            provider=provider,
+        )
+    except Exception:
+        archive = None
+    return jsonify({"job": job, "archive": archive}), 202
 
 
 @app.post("/api/scenes/generate-images")
@@ -2908,6 +3730,7 @@ def api_generate_images_batch() -> Any:
     payload = request.get_json(silent=True) or {}
     dry_run = bool(payload.get("dry_run", False))
     only_missing = bool(payload.get("only_missing", True))
+    provider = str(payload.get("provider", "auto")).strip().lower() or "auto"
     scene_ids_raw = payload.get("scene_ids", [])
 
     scenes = list_scenes()
@@ -2929,7 +3752,16 @@ def api_generate_images_batch() -> Any:
         except Exception as exc:  # noqa: BLE001
             errors.append({"scene_id": scene["scene_id"], "error": str(exc)})
 
-    return jsonify({"launched": launched, "errors": errors}), 202
+    archive = None
+    try:
+        archive = archive_dashboard_run(
+            source="batch_images",
+            mode="dry_run" if dry_run else "live",
+            provider=provider,
+        )
+    except Exception:
+        archive = None
+    return jsonify({"launched": launched, "errors": errors, "archive": archive}), 202
 
 
 @app.post("/api/scenes/generate-videos")
@@ -2938,6 +3770,7 @@ def api_generate_videos_batch() -> Any:
     payload = request.get_json(silent=True) or {}
     dry_run = bool(payload.get("dry_run", False))
     only_missing = bool(payload.get("only_missing", True))
+    provider = str(payload.get("provider", "auto")).strip().lower() or "auto"
     scene_ids_raw = payload.get("scene_ids", [])
 
     scenes = list_scenes()
@@ -2957,7 +3790,16 @@ def api_generate_videos_batch() -> Any:
         except Exception as exc:  # noqa: BLE001
             errors.append({"scene_id": scene["scene_id"], "error": str(exc)})
 
-    return jsonify({"launched": launched, "errors": errors}), 202
+    archive = None
+    try:
+        archive = archive_dashboard_run(
+            source="batch_videos",
+            mode="dry_run" if dry_run else "live",
+            provider=provider,
+        )
+    except Exception:
+        archive = None
+    return jsonify({"launched": launched, "errors": errors, "archive": archive}), 202
 
 
 @app.get("/api/scene-jobs")
@@ -2973,7 +3815,7 @@ def api_character() -> Any:
     reconcile_provider_jobs()
     backfill_registry_from_current_character_state()
     try:
-        auto_bind_character_from_registry(force=False)
+        auto_attach_character_from_story(force=False)
     except Exception:
         pass
     return jsonify(get_character_state())
@@ -3003,12 +3845,22 @@ def api_character_generate() -> Any:
     bootstrap_once()
     payload = request.get_json(silent=True) or {}
     dry_run = bool(payload.get("dry_run", False))
+    provider = str(payload.get("provider", "auto")).strip().lower() or "auto"
     try:
         submit_only = is_serverless_runtime() and not dry_run
         result = generate_character_model(dry_run=dry_run, submit_only=submit_only)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 400
-    return jsonify(result), 200
+    archive = None
+    try:
+        archive = archive_dashboard_run(
+            source="character_generate",
+            mode="dry_run" if dry_run else "live",
+            provider=provider,
+        )
+    except Exception:
+        archive = None
+    return jsonify({"result": result, "archive": archive}), 200
 
 
 @app.get("/api/character/audit")
@@ -3045,7 +3897,74 @@ def api_character_audit_post() -> Any:
 @app.get("/api/character/registry")
 def api_character_registry_get() -> Any:
     bootstrap_once()
-    return jsonify({"count": count_character_registry(), "items": list_character_registry(limit=120)})
+    search = str(request.args.get("search", "") or "").strip()
+    limit_raw = str(request.args.get("limit", "120") or "120").strip()
+    try:
+        limit = max(1, min(300, int(limit_raw)))
+    except Exception:
+        limit = 120
+    context = collect_story_context()
+    story_matches = find_story_registry_candidates(str(context.get("merged_text", "")), limit=5)
+    return jsonify(
+        {
+            "count": count_character_registry(),
+            "items": list_character_registry(limit=limit, search=search),
+            "search": search,
+            "story_matches": [
+                {
+                    "id": item.get("id"),
+                    "name": item.get("name"),
+                    "image_url": item.get("image_url"),
+                    "audit_score": item.get("audit_score"),
+                    "audit_status": item.get("audit_status"),
+                }
+                for item in story_matches
+            ],
+        }
+    )
+
+
+@app.post("/api/character/attach")
+def api_character_attach() -> Any:
+    bootstrap_once()
+    payload = request.get_json(silent=True) or {}
+    record: Optional[Dict[str, Any]] = None
+    record_id = str(payload.get("registry_id", "")).strip()
+    name = str(payload.get("name", "")).strip()
+    if record_id:
+        record = get_character_registry_record_by_id(record_id)
+    elif name:
+        record = get_character_registry_record_by_name(name)
+    if record is None:
+        return jsonify({"error": "Character record not found."}), 404
+    try:
+        attached = attach_character_record_to_story(record, reason="manual_attach", force=True)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 400
+    archive = None
+    try:
+        archive = archive_dashboard_run(source="character_attach", mode="live", provider="auto")
+    except Exception:
+        archive = None
+    return jsonify({"attached": attached, "archive": archive})
+
+
+@app.post("/api/character/auto-match")
+def api_character_auto_match() -> Any:
+    bootstrap_once()
+    payload = request.get_json(silent=True) or {}
+    force = bool(payload.get("force", False))
+    try:
+        result = auto_attach_character_from_story(force=force)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 400
+    archive = None
+    if result.get("bound"):
+        try:
+            archive = archive_dashboard_run(source="character_auto_match", mode="live", provider="auto")
+        except Exception:
+            archive = None
+    return jsonify({"result": result, "archive": archive})
 
 
 @app.post("/api/character/auto-bind")
@@ -3057,7 +3976,13 @@ def api_character_auto_bind() -> Any:
         result = auto_bind_character_from_registry(force=force)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 400
-    return jsonify(result)
+    archive = None
+    if result.get("bound"):
+        try:
+            archive = archive_dashboard_run(source="character_auto_bind", mode="live", provider="auto")
+        except Exception:
+            archive = None
+    return jsonify({"result": result, "archive": archive})
 
 
 @app.get("/api/script")
@@ -3073,13 +3998,25 @@ def api_script_patch() -> Any:
     text = payload.get("script_text")
     if not isinstance(text, str):
         return jsonify({"error": "script_text must be string"}), 400
-    return jsonify(write_script_text(text))
+    updated = write_script_text(text)
+    auto_match = None
+    try:
+        auto_match = auto_attach_character_from_story(force=False)
+    except Exception:
+        auto_match = None
+    archive = None
+    try:
+        archive = archive_dashboard_run(source="script_update", mode="live", provider="auto")
+    except Exception:
+        archive = None
+    return jsonify({"script": updated, "auto_match": auto_match, "archive": archive})
 
 
 @app.get("/api/runs")
 def api_runs() -> Any:
     bootstrap_once()
     reconcile_trigger_jobs()
+    reconcile_provider_jobs()
     return jsonify({"runs": list_runs()})
 
 
@@ -3108,9 +4045,18 @@ def api_run_download(run_id: str) -> Any:
 def api_latest_run_download() -> Any:
     bootstrap_once()
     path = latest_payload_path()
-    if path is None or not path.exists():
+    if path is not None and path.exists():
+        return stream_file_response(path, download_name=path.name, mimetype="application/json")
+    runs = list_runs(limit=1)
+    if not runs:
         return jsonify({"error": "No payload file available"}), 404
-    return stream_file_response(path, download_name=path.name, mimetype="application/json")
+    run_id = str(runs[0].get("run_id", "")).strip()
+    payload = read_payload_by_run_id(run_id) if run_id else None
+    if payload is None:
+        return jsonify({"error": "No payload file available"}), 404
+    raw = json.dumps(payload, indent=2, ensure_ascii=True).encode("utf-8")
+    headers = {"Content-Disposition": f'attachment; filename="{run_id or "latest_payload"}.json"'}
+    return Response(raw, headers=headers, mimetype="application/json")
 
 
 @app.get("/api/scenes/<scene_id>/download/<asset_kind>")
@@ -3172,7 +4118,16 @@ def api_trigger() -> Any:
         job = start_trigger_job(dry_run=dry_run, provider=provider)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 400
-    return jsonify(job), 202
+    archive = None
+    try:
+        archive = archive_dashboard_run(
+            source="full_trigger_request",
+            mode="dry_run" if dry_run else "live",
+            provider=provider,
+        )
+    except Exception:
+        archive = None
+    return jsonify({"job": job, "archive": archive}), 202
 
 
 def main() -> None:
